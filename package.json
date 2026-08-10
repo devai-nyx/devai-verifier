@@ -1,0 +1,15 @@
+{
+  "name": "@devai-nyx/evidence-verifier-reference",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "devai-evidence-verify": "./src/cli.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
