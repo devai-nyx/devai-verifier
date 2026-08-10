@@ -14,16 +14,46 @@ const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const ENVIRONMENT_KEY = /^[A-Z_][A-Z0-9_]*$/u;
 
-function git(repo, args, { encoding = 'utf8' } = {}) {
+function git(repo, args, { encoding = 'utf8', input } = {}) {
   const result = spawnSync('git', ['-C', repo, ...args], {
     encoding,
     maxBuffer: 64 * 1024 * 1024,
+    ...(input !== undefined && { input }),
   });
   if (result.error !== undefined || result.status !== 0) {
     const detail = result.error?.message ?? String(result.stderr || result.stdout).trim();
     throw new VerificationError('GIT_ERROR', `git ${args[0]} failed: ${detail}`);
   }
   return result.stdout;
+}
+
+function objectContentDigests(repo, objectIds) {
+  const unique = [...new Set(objectIds)].sort();
+  if (unique.length === 0) return new Map();
+  const output = Buffer.from(
+    git(repo, ['cat-file', '--batch'], { encoding: null, input: `${unique.join('\n')}\n` }),
+  );
+  const digests = new Map();
+  let offset = 0;
+  for (const expectedObjectId of unique) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline < 0) throw new VerificationError('GIT_ERROR', 'truncated cat-file header');
+    const header = output.subarray(offset, newline).toString('utf8');
+    const match = /^([0-9a-f]+) ([a-z]+) (\d+)$/u.exec(header);
+    if (match?.[1] === undefined || match[3] === undefined || match[1] !== expectedObjectId) {
+      throw new VerificationError('GIT_ERROR', 'unexpected cat-file header');
+    }
+    const size = Number(match[3]);
+    const contentStart = newline + 1;
+    const contentEnd = contentStart + size;
+    if (!Number.isSafeInteger(size) || size < 0 || output[contentEnd] !== 0x0a) {
+      throw new VerificationError('GIT_ERROR', 'truncated cat-file content');
+    }
+    digests.set(expectedObjectId, sha256Hex(output.subarray(contentStart, contentEnd)));
+    offset = contentEnd + 1;
+  }
+  if (offset !== output.length) throw new VerificationError('GIT_ERROR', 'extra cat-file output');
+  return digests;
 }
 
 function resolveCommit(repo, value, label) {
@@ -382,7 +412,10 @@ export function buildExpectedTaskPolicy({
   const selected = selectedNodeIds(descriptor, profile, changes);
   const entries = snapshot(repo, candidateCommit);
   const descriptorDigest = sha256Hex(descriptor);
-  const blobDigests = new Map();
+  const blobDigests = objectContentDigests(
+    repo,
+    entries.map((entry) => entry.objectId),
+  );
   const taskKeys = new Map();
   for (const task of ordered) {
     const selectedToolchain = {};
@@ -402,12 +435,8 @@ export function buildExpectedTaskPolicy({
     const inputs = [];
     for (const entry of entries) {
       if (!task.inputSelectors.some((selector) => selectorMatches(selector, entry.path))) continue;
-      let digest = blobDigests.get(entry.objectId);
-      if (digest === undefined) {
-        const bytes = git(repo, ['cat-file', '-p', entry.objectId], { encoding: null });
-        digest = sha256Hex(bytes);
-        blobDigests.set(entry.objectId, digest);
-      }
+      const digest = blobDigests.get(entry.objectId);
+      if (digest === undefined) throw new VerificationError('GIT_ERROR', 'object digest missing');
       inputs.push({ path: entry.path, mode: entry.mode, type: entry.type, contentDigest: digest });
     }
     const dependencies = task.dependencies.map((nodeId) => ({
