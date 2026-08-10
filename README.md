@@ -60,6 +60,60 @@ Exit contract:
 
 Run focused tests with `node --test`.
 
+## Trusted local export
+
+`src/export-cli.js` is the candidate-independent bridge between a local DEVAI
+runner cache and the verifier inputs above. It does not run tests and does not
+make execution truthful. It independently requires a clean exact candidate,
+reads `test-tasks.json` from the committed Git tree, rebuilds the selected task
+policy, checks the unsigned receipt and every required result through the same
+verifier, and only then signs the canonical receipt bytes.
+
+The private key, public key, toolchain map, environment map, and output directory
+must be outside the candidate repository. The command never generates a key and
+never accepts a candidate-controlled key. The resulting trust store is a setup
+artifact containing only the explicitly supplied public key; repository secrets
+and revocations remain protected operator configuration.
+
+```text
+node src/export-cli.js \
+  --repo /exact/candidate \
+  --receipt /exact/candidate/.devai/state/check-cache/v1/receipts/<digest>.json \
+  --results-dir /exact/candidate/.devai/state/check-cache/v1/results \
+  --profile rc \
+  --commit <exact-commit> \
+  --tree <exact-tree> \
+  --toolchain /protected/control/toolchain.json \
+  --environment /protected/control/environment.json \
+  --private-key /protected/control/ed25519-private.pem \
+  --public-key /protected/control/ed25519-public.pem \
+  --signer-id local-rc-signer \
+  --output-dir /protected/evidence/<exact-commit>
+```
+
+Affected-mode export additionally requires `--base <exact-ancestor-commit>`.
+The output directory is created atomically and contains `envelope.json`,
+`task-policy.json`, `trust-store.json`, `manifest.json`, and only the exact
+digest-named result files referenced by the receipt.
+
+To prepare the existing GitHub workflow inputs from a protected shell, encode
+the three JSON files directly and create the result archive with a stable name:
+
+```text
+base64 < envelope.json
+base64 < task-policy.json
+base64 < trust-store.json
+tar -C results -czf results.tgz .
+base64 < results.tgz
+```
+
+Configure the corresponding protected values as
+`DEVAI_LEDGER_ENVELOPE_B64`, `DEVAI_LEDGER_TASK_POLICY_B64`,
+`DEVAI_LEDGER_TRUST_STORE_B64`, `DEVAI_LEDGER_RESULTS_TGZ_B64`, and set
+`DEVAI_LEDGER_POLICY_DIGEST` to `manifest.json.taskPolicyDigest`. Publishing
+those values is an operator action; the export command performs no network or
+GitHub mutation.
+
 ## Expected-policy builder
 
 `src/build-policy-cli.js` derives the verifier's expected task policy from an

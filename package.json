@@ -8,7 +8,8 @@
   },
   "bin": {
     "devai-evidence-verify": "./src/cli.js",
-    "devai-evidence-policy": "./src/build-policy-cli.js"
+    "devai-evidence-policy": "./src/build-policy-cli.js",
+    "devai-evidence-export": "./src/export-cli.js"
   },
   "scripts": {
     "test": "node --test"
