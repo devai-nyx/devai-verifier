@@ -59,3 +59,34 @@ Exit contract:
 - `70`: unexpected verifier failure; empty stdout and one JSON error object on stderr.
 
 Run focused tests with `node --test`.
+
+## Expected-policy builder
+
+`src/build-policy-cli.js` derives the verifier's expected task policy from an
+approved task descriptor and an exact Git candidate snapshot. Reusable task keys
+bind selected candidate blob contents, modes and paths; canonical argv, cwd,
+runner, toolchain and allowlisted environment values; output contract; and
+dependency task keys. They deliberately exclude commit identity and mtimes.
+
+Affected mode classifies both sides of deletions and renames. Unmatched paths
+fail closed unless the approved descriptor names a fallback task. Selectors
+explicitly marked dynamic also choose that fallback. Fixed profiles select their
+declared node closure without a base commit.
+
+```text
+node src/build-policy-cli.js \
+  --repo /exact/local/repository \
+  --descriptor task-descriptor.json \
+  --profile affected \
+  --commit <exact-commit> \
+  --tree <exact-tree> \
+  --base <exact-base-commit> \
+  --toolchain toolchain.json \
+  --environment environment.json \
+  --output expected-task-policy.json
+```
+
+The command writes only the expected task-policy JSON to `--output` and reports
+its SHA-256 digest on stdout. The verifier and policy builder remain separate:
+the independently controlled caller must pin the descriptor, toolchain values,
+environment inputs, and resulting policy digest.

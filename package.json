@@ -7,7 +7,8 @@
     "node": ">=24"
   },
   "bin": {
-    "devai-evidence-verify": "./src/cli.js"
+    "devai-evidence-verify": "./src/cli.js",
+    "devai-evidence-policy": "./src/build-policy-cli.js"
   },
   "scripts": {
     "test": "node --test"
