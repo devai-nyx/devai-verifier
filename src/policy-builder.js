@@ -382,7 +382,8 @@ function selectedNodeIds(descriptor, profile, changes) {
     const nodeId = downstreamQueue[index];
     selected.add(nodeId);
     for (const dependent of dependents.get(nodeId)) {
-      if ((eligible === null || eligible.has(dependent)) && !impacted.has(dependent)) {
+      const aggregateFallback = dependent === descriptor.fallbackNodeId;
+      if (!aggregateFallback && (eligible === null || eligible.has(dependent)) && !impacted.has(dependent)) {
         impacted.add(dependent);
         downstreamQueue.push(dependent);
       }
@@ -450,6 +451,7 @@ export function buildExpectedTaskPolicy({
   );
   const taskKeys = new Map();
   for (const task of ordered) {
+    if (!selected.has(task.nodeId)) continue;
     const selectedToolchain = {};
     for (const key of [...task.toolchainKeys].sort()) {
       if (toolchain[key] === undefined) {

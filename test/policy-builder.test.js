@@ -116,6 +116,7 @@ function descriptor({ fallbackNodeId = 'full', dynamic = true } = {}) {
       }),
       task({
         nodeId: 'full',
+        dependencies: ['contract'],
         inputSelectors: [{ kind: 'glob', pattern: '**' }],
         argv: ['node', '--test'],
         toolchainKeys: ['git', 'node'],
@@ -232,7 +233,7 @@ describe('candidate snapshot and affected derivation', () => {
       const built = build({ repo: state.repo, base: state.base, candidate });
       assert.deepEqual(
         built.taskPolicy.requiredNodes.map((node) => node.nodeId),
-        ['prepare', 'full'],
+        ['prepare', 'unit', 'contract', 'full'],
       );
     }
 
@@ -264,6 +265,7 @@ describe('candidate snapshot and affected derivation', () => {
       repo: state.repo,
       candidate: state.base,
       profileId: 'contract-only',
+      toolchain: { node: TOOLCHAIN.node },
     });
     assert.deepEqual(
       built.taskPolicy.requiredNodes.map((node) => node.nodeId),
