@@ -231,16 +231,38 @@ function validateDescriptor(descriptor) {
   const profileIds = [];
   for (const [index, profile] of descriptor.profiles.entries()) {
     const label = `profiles[${index}]`;
-    assertExactKeys(profile, ['mode', 'profileId', 'requiredNodes'], label);
+    assertExactKeys(
+      profile,
+      profile.mode === 'affected'
+        ? ['eligibleNodes', 'mode', 'profileId', 'requiredNodes']
+        : ['mode', 'profileId', 'requiredNodes'],
+      label,
+    );
     assertString(profile.profileId, `${label}.profileId`, IDENTIFIER);
     if (profile.mode !== 'affected' && profile.mode !== 'fixed') {
       throw new VerificationError('SCHEMA_INVALID', `${label}.mode is invalid`);
     }
     assertUniqueStrings(profile.requiredNodes, `${label}.requiredNodes`);
-    for (const nodeId of profile.requiredNodes) {
+    if (profile.mode === 'affected') {
+      assertUniqueStrings(profile.eligibleNodes, `${label}.eligibleNodes`);
+    }
+    const eligible = new Set(profile.eligibleNodes ?? []);
+    for (const nodeId of [...profile.requiredNodes, ...eligible]) {
       if (!knownTasks.has(nodeId)) {
         throw new VerificationError('PROFILE_NODE_UNKNOWN', `${label} names unknown node ${nodeId}`);
       }
+    }
+    if (
+      profile.mode === 'affected' &&
+      (profile.requiredNodes.some((nodeId) => !eligible.has(nodeId)) ||
+        (descriptor.fallbackNodeId !== null && !eligible.has(descriptor.fallbackNodeId)) ||
+        descriptor.tasks.some(
+          (task) =>
+            eligible.has(task.nodeId) &&
+            task.dependencies.some((dependency) => !eligible.has(dependency)),
+        ))
+    ) {
+      throw new VerificationError('SCHEMA_INVALID', `${label} is not closed over required nodes`);
     }
     profileIds.push(profile.profileId);
   }
@@ -319,6 +341,7 @@ function changedPaths(repo, base, candidate) {
 function selectedNodeIds(descriptor, profile, changes) {
   const selected = new Set(profile.requiredNodes);
   const impacted = new Set();
+  const eligible = profile.mode === 'affected' ? new Set(profile.eligibleNodes) : null;
   if (profile.mode === 'affected') {
     for (const path of changes) {
       if (descriptor.dynamicFallbackSelectors.some((selector) => selectorMatches(selector, path))) {
@@ -327,6 +350,7 @@ function selectedNodeIds(descriptor, profile, changes) {
       }
       const matched = descriptor.tasks.filter(
         (task) =>
+          eligible.has(task.nodeId) &&
           task.nodeId !== descriptor.fallbackNodeId &&
           task.inputSelectors.some((selector) => selectorMatches(selector, path)),
       );
@@ -350,7 +374,7 @@ function selectedNodeIds(descriptor, profile, changes) {
     const nodeId = downstreamQueue[index];
     selected.add(nodeId);
     for (const dependent of dependents.get(nodeId)) {
-      if (!impacted.has(dependent)) {
+      if ((eligible === null || eligible.has(dependent)) && !impacted.has(dependent)) {
         impacted.add(dependent);
         downstreamQueue.push(dependent);
       }

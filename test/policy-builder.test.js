@@ -124,7 +124,12 @@ function descriptor({ fallbackNodeId = 'full', dynamic = true } = {}) {
       }),
     ],
     profiles: [
-      { profileId: 'affected', mode: 'affected', requiredNodes: ['prepare'] },
+      {
+        profileId: 'affected',
+        mode: 'affected',
+        requiredNodes: ['prepare'],
+        eligibleNodes: ['prepare', 'unit', 'contract', 'full'],
+      },
       {
         profileId: 'rc',
         mode: 'fixed',
@@ -239,6 +244,9 @@ describe('candidate snapshot and affected derivation', () => {
     noFallback.profiles = noFallback.profiles.map((profile) => ({
       ...profile,
       requiredNodes: profile.requiredNodes.filter((nodeId) => nodeId !== 'full'),
+      ...(profile.eligibleNodes !== undefined && {
+        eligibleNodes: profile.eligibleNodes.filter((nodeId) => nodeId !== 'full'),
+      }),
     }));
     expectCode('UNKNOWN_PATH', () =>
       build({

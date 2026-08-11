@@ -85,8 +85,20 @@
             "type": "array",
             "uniqueItems": true,
             "items": { "type": "string", "minLength": 1 }
+          },
+          "eligibleNodes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "mode": { "const": "affected" } } },
+            "then": { "required": ["eligibleNodes"] },
+            "else": { "not": { "required": ["eligibleNodes"] } }
+          }
+        ]
       }
     }
   },
