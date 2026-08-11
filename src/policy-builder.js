@@ -129,6 +129,14 @@ function validateStringMap(value, label) {
   }
 }
 
+function validateEnvironmentMap(value, label) {
+  assertObject(value, label);
+  for (const [key, entry] of Object.entries(value)) {
+    assertString(key, `${label} key`, IDENTIFIER);
+    if (entry !== null) assertString(entry, `${label}.${key}`);
+  }
+}
+
 function validateDescriptor(descriptor) {
   assertExactKeys(
     descriptor,
@@ -409,7 +417,7 @@ export function buildExpectedTaskPolicy({
 }) {
   validateDescriptor(descriptor);
   validateStringMap(toolchain, 'toolchain');
-  validateStringMap(environment, 'environment');
+  validateEnvironmentMap(environment, 'environment');
   const ordered = topologicalTasks(descriptor);
   resolveCommit(repo, candidateCommit, 'candidate commit');
   const candidateTree = git(repo, ['show', '-s', '--format=%T', candidateCommit]).trim();
@@ -451,7 +459,7 @@ export function buildExpectedTaskPolicy({
     }
     const selectedEnvironment = {};
     for (const key of [...task.allowlistedEnv].sort()) {
-      if (environment[key] === undefined) {
+      if (!Object.hasOwn(environment, key)) {
         throw new VerificationError('ENVIRONMENT_MISSING', `task ${task.nodeId} requires environment ${key}`);
       }
       selectedEnvironment[key] = environment[key];
@@ -515,5 +523,16 @@ export function readStringMap(path, label) {
     throw new VerificationError('MALFORMED_JSON', `${label} is invalid: ${error.message}`);
   }
   validateStringMap(value, label);
+  return value;
+}
+
+export function readEnvironmentMap(path, label) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    throw new VerificationError('MALFORMED_JSON', `${label} is invalid: ${error.message}`);
+  }
+  validateEnvironmentMap(value, label);
   return value;
 }

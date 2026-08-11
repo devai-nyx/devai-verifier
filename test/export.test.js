@@ -37,7 +37,7 @@ function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
 
-function fixture() {
+function fixture({ allowlistedEnv = [], environmentValue = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'devai-export-test-'));
   temporaryDirectories.push(root);
   const repo = join(root, 'candidate');
@@ -60,7 +60,7 @@ function fixture() {
         runner: 'node-test-v1',
         inputSelectors: [{ kind: 'exact', pattern: 'input.txt' }],
         toolchainKeys: ['node'],
-        allowlistedEnv: [],
+        allowlistedEnv,
         outputContract: { kind: 'node-test', requiredResult: 'pass' },
       },
     ],
@@ -75,7 +75,7 @@ function fixture() {
   const toolchain = join(root, 'toolchain.json');
   const environment = join(root, 'environment.json');
   put(toolchain, '{"node":"v24.5.0"}\n');
-  put(environment, '{}\n');
+  put(environment, `${JSON.stringify(environmentValue)}\n`);
   const built = buildExpectedTaskPolicy({
     repo,
     descriptor,
@@ -83,7 +83,7 @@ function fixture() {
     candidateCommit: commit,
     expectedTree: tree,
     toolchain: { node: 'v24.5.0' },
-    environment: {},
+    environment: environmentValue,
   });
   const result = {
     schemaVersion: '1.0.0',
@@ -166,6 +166,18 @@ describe('trusted candidate evidence export', () => {
     });
     assert.equal(verified.ok, true);
     assert.match(readFileSync(join(state.outputDir, 'manifest.json'), 'utf8'), /local-rc-signer/u);
+  });
+
+  it('exports distinct policies for absent and explicitly empty allowlisted environment values', () => {
+    const absent = fixture({ allowlistedEnv: ['CI'], environmentValue: { CI: null } });
+    const empty = fixture({ allowlistedEnv: ['CI'], environmentValue: { CI: '' } });
+
+    const absentResult = exportCandidateEvidence(exportOptions(absent));
+    const emptyResult = exportCandidateEvidence(exportOptions(empty));
+
+    assert.equal(absentResult.taskPolicyDigest, absent.built.taskPolicyDigest);
+    assert.equal(emptyResult.taskPolicyDigest, empty.built.taskPolicyDigest);
+    assert.notEqual(absentResult.taskPolicyDigest, emptyResult.taskPolicyDigest);
   });
 
   it('refuses dirty candidates before signing', () => {

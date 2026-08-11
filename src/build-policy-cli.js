@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 import { VerificationError, canonicalize, readJson } from './canonical.js';
-import { buildExpectedTaskPolicy, readStringMap } from './policy-builder.js';
+import {
+  buildExpectedTaskPolicy,
+  readEnvironmentMap,
+  readStringMap,
+} from './policy-builder.js';
 
 const requiredNames = new Set([
   'repo',
@@ -51,7 +55,7 @@ try {
     expectedTree: values.tree,
     baseCommit: values.base,
     toolchain: readStringMap(values.toolchain, 'toolchain'),
-    environment: readStringMap(values.environment, 'environment'),
+    environment: readEnvironmentMap(values.environment, 'environment'),
   });
   writeFileSync(values.output, `${canonicalize(built.taskPolicy)}\n`, { flag: 'wx' });
   process.stdout.write(

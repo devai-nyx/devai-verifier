@@ -14,7 +14,11 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { VerificationError, canonicalBytes, canonicalize, readJson, sha256Hex } from './canonical.js';
-import { buildExpectedTaskPolicy, readStringMap } from './policy-builder.js';
+import {
+  buildExpectedTaskPolicy,
+  readEnvironmentMap,
+  readStringMap,
+} from './policy-builder.js';
 import { PAYLOAD_TYPE, verifyCandidateEvidence } from './verify.js';
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -136,7 +140,7 @@ export function exportCandidateEvidence({
     expectedTree: tree,
     baseCommit,
     toolchain: readStringMap(controlledToolchain, 'toolchain'),
-    environment: readStringMap(controlledEnvironment, 'environment'),
+    environment: readEnvironmentMap(controlledEnvironment, 'environment'),
   });
   const receipt = readJson(receiptPath, 'candidate receipt');
   const payload = canonicalBytes(receipt);

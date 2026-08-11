@@ -350,6 +350,25 @@ describe('reusable task identity', () => {
       }),
     );
     assert.equal(ignoredEnvironment.get('unit'), baseline.get('unit'));
+
+    const absentEnvironment = keyMap(
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        environment: { ...ENVIRONMENT, CI: null },
+      }),
+    );
+    const emptyEnvironment = keyMap(
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        environment: { ...ENVIRONMENT, CI: '' },
+      }),
+    );
+    assert.notEqual(absentEnvironment.get('unit'), emptyEnvironment.get('unit'));
+    assert.notEqual(absentEnvironment.get('unit'), baseline.get('unit'));
   });
 });
 
@@ -392,6 +411,42 @@ describe('fail-closed descriptor and Git boundaries', () => {
         expectedTree: 'f'.repeat(40),
         toolchain: TOOLCHAIN,
         environment: ENVIRONMENT,
+      }),
+    );
+  });
+
+  it('accepts null only for environment values and still requires every allowlisted key', () => {
+    const state = repository();
+    assert.doesNotThrow(() =>
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        environment: { CI: null },
+      }),
+    );
+    expectCode('ENVIRONMENT_MISSING', () =>
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        environment: {},
+      }),
+    );
+    expectCode('SCHEMA_INVALID', () =>
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        toolchain: { ...TOOLCHAIN, node: null },
+      }),
+    );
+    expectCode('SCHEMA_INVALID', () =>
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        environment: { CI: false },
       }),
     );
   });
