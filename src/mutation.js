@@ -43,7 +43,14 @@ function committedJson(repo, commit, path, label) {
   }
 }
 
-function mutationThresholds(policy, packageName) {
+function mutationThresholds(policy, packageName, literalOverride) {
+  if (literalOverride !== undefined) {
+    return {
+      break: literalOverride,
+      high: literalOverride,
+      low: Math.max(60, literalOverride - 10),
+    };
+  }
   const override = policy.perPackage?.[packageName]?.mutation;
   if (typeof override === 'number') {
     return { break: override, high: override, low: Math.max(60, override - 10) };
@@ -116,13 +123,25 @@ export function resolveMutationDiscoveryContract(repo, commit, contract) {
       }
       if (configs.length === 0) continue;
       assertString(manifest.name, `manifest ${manifestPath} package name`, PACKAGE_NAME);
+      const configSource = git(repo, ['show', `${commit}:${configs[0]}`]);
+      const literalMatches = [
+        ...configSource.matchAll(/\bthreshold\s*:\s*(\d+(?:\.\d+)?)/gu),
+      ];
+      if (literalMatches.length > 1) {
+        throw new VerificationError(
+          'MUTATION_THRESHOLD_MISMATCH',
+          `${workspace} declares multiple literal threshold overrides`,
+        );
+      }
+      const literalThreshold =
+        literalMatches[0]?.[1] === undefined ? undefined : Number(literalMatches[0][1]);
       const stem = workspace.replaceAll('/', '-');
       packages.push({
         packageName: manifest.name,
         workspace,
         resultPath: `${contract.artifactRoot}/${stem}.result.json`,
         reportPath: `${contract.artifactRoot}/${stem}.stryker.json`,
-        thresholds: mutationThresholds(testPolicy, manifest.name),
+        thresholds: mutationThresholds(testPolicy, manifest.name, literalThreshold),
       });
     }
   }

@@ -546,7 +546,7 @@ describe('mutation output discovery', () => {
       'packages/core/package.json',
       JSON.stringify({ name: '@stynx/core', scripts: { stryker: 'stryker run' } }),
     );
-    put(state.repo, 'packages/core/stryker.conf.mjs', 'export default {}\n');
+    put(state.repo, 'packages/core/stryker.conf.mjs', 'export default { threshold: 70 }\n');
     put(
       state.repo,
       'packages/plain/package.json',
@@ -568,7 +568,7 @@ describe('mutation output discovery', () => {
         workspace: 'packages/core',
         resultPath: '.devai/local/evidence/mutation/packages-core.result.json',
         reportPath: '.devai/local/evidence/mutation/packages-core.stryker.json',
-        thresholds: { break: 90, high: 100, low: 90 },
+        thresholds: { break: 70, high: 70, low: 60 },
       },
     ]);
 
