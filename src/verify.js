@@ -1,5 +1,6 @@
 import { createPublicKey, verify as verifySignature } from 'node:crypto';
-import { join } from 'node:path';
+import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
 import {
   VerificationError,
   assertExactKeys,
@@ -15,10 +16,22 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const PAYLOAD_TYPE = 'application/vnd.devai.candidate-receipt+json;version=1';
+const PORTABLE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)(?!.*\0)[^/]+(?:\/[^/]+)*$/u;
+
+function validateOutputContract(contract, label) {
+  assertObject(contract, label);
+  canonicalBytes(contract);
+  if (contract.paths === undefined) return;
+  assertUniqueStrings(contract.paths, `${label}.paths`);
+  if (contract.paths.length === 0) {
+    throw new VerificationError('SCHEMA_INVALID', `${label}.paths must be nonempty when present`);
+  }
+  for (const path of contract.paths) assertString(path, `${label} path`, PORTABLE_PATH);
+}
 
 function validateTaskPolicy(policy) {
   assertExactKeys(policy, ['repositoryId', 'requiredNodes', 'schemaVersion'], 'task policy');
-  if (policy.schemaVersion !== '1.0.0') {
+  if (policy.schemaVersion !== '1.0.0' && policy.schemaVersion !== '1.1.0') {
     throw new VerificationError('SCHEMA_INVALID', 'unsupported task-policy schemaVersion');
   }
   assertString(policy.repositoryId, 'task policy repositoryId', IDENTIFIER);
@@ -28,10 +41,15 @@ function validateTaskPolicy(policy) {
   const nodeIds = [];
   for (const [index, node] of policy.requiredNodes.entries()) {
     const label = `task policy requiredNodes[${index}]`;
-    assertExactKeys(node, ['dependencies', 'nodeId', 'taskKey'], label);
+    const keys = ['dependencies', 'nodeId', 'taskKey'];
+    if (policy.schemaVersion === '1.1.0') keys.push('outputContract');
+    assertExactKeys(node, keys, label);
     assertString(node.nodeId, `${label}.nodeId`, IDENTIFIER);
     assertString(node.taskKey, `${label}.taskKey`, SHA256);
     assertUniqueStrings(node.dependencies, `${label}.dependencies`);
+    if (policy.schemaVersion === '1.1.0') {
+      validateOutputContract(node.outputContract, `${label}.outputContract`);
+    }
     nodeIds.push(node.nodeId);
   }
   assertUniqueStrings(nodeIds, 'task policy node IDs');
@@ -111,7 +129,7 @@ function validateReceipt(receipt) {
     ['createdAt', 'profile', 'repository', 'schemaVersion', 'taskPolicyDigest', 'tasks'],
     'candidate receipt',
   );
-  if (receipt.schemaVersion !== '1.0.0') {
+  if (receipt.schemaVersion !== '1.0.0' && receipt.schemaVersion !== '1.1.0') {
     throw new VerificationError('SCHEMA_INVALID', 'unsupported candidate-receipt schemaVersion');
   }
   assertExactKeys(receipt.repository, ['commit', 'id', 'tree'], 'candidate receipt repository');
@@ -169,13 +187,90 @@ function validateTaskResult(result, label) {
     assertString(digest, `${label} dependency digest`, SHA256);
   }
   for (const [key, digest] of Object.entries(result.outputDigests)) {
-    assertString(key, `${label} output name`, IDENTIFIER);
+    assertString(key, `${label} output name`, PORTABLE_PATH);
     assertString(digest, `${label} output digest`, SHA256);
   }
   if (result.status !== 'PASS') {
     const rendered = typeof result.status === 'string' ? result.status : '<malformed>';
     throw new VerificationError('TASK_STATUS_NOT_PASS', `${label} status is ${rendered}, not PASS`);
   }
+}
+
+function artifactPaths(policy) {
+  const paths = new Set();
+  for (const node of policy.requiredNodes) {
+    if (policy.schemaVersion !== '1.1.0') continue;
+    for (const path of node.outputContract.paths ?? []) paths.add(path);
+  }
+  return [...paths].sort();
+}
+
+function filesBelow(root, current = root) {
+  const files = [];
+  for (const entry of readdirSync(current, { withFileTypes: true })) {
+    const absolute = join(current, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new VerificationError('ARTIFACT_SYMLINK', 'artifact bundle contains a symbolic link');
+    }
+    if (entry.isDirectory()) files.push(...filesBelow(root, absolute));
+    else if (entry.isFile()) files.push(relative(root, absolute).split(sep).join('/'));
+    else throw new VerificationError('ARTIFACT_INVALID', 'artifact bundle contains a non-regular file');
+  }
+  return files;
+}
+
+function verifyArtifacts(policy, results, artifactsDir) {
+  const expectedPaths = artifactPaths(policy);
+  if (expectedPaths.length === 0) return [];
+  if (typeof artifactsDir !== 'string') {
+    throw new VerificationError('ARTIFACTS_MISSING', 'schema 1.1 output artifacts directory is required');
+  }
+  let actualPaths;
+  try {
+    actualPaths = filesBelow(resolve(artifactsDir)).sort();
+  } catch (error) {
+    if (error instanceof VerificationError) throw error;
+    throw new VerificationError('ARTIFACTS_MISSING', `artifact directory is unreadable: ${error.message}`);
+  }
+  if (
+    actualPaths.length !== expectedPaths.length ||
+    actualPaths.some((path, index) => path !== expectedPaths[index])
+  ) {
+    throw new VerificationError('ARTIFACT_POPULATION_MISMATCH', 'artifact population differs from policy');
+  }
+  const policyById = new Map(policy.requiredNodes.map((node) => [node.nodeId, node]));
+  for (const [nodeId, result] of results) {
+    const paths = policyById.get(nodeId).outputContract.paths ?? [];
+    const expectedOutputNames = ['stderr', 'stdout', ...paths].sort();
+    const actualOutputNames = Object.keys(result.outputDigests).sort();
+    if (
+      actualOutputNames.length !== expectedOutputNames.length ||
+      actualOutputNames.some((name, index) => name !== expectedOutputNames[index])
+    ) {
+      throw new VerificationError('OUTPUT_POPULATION_MISMATCH', `node ${nodeId} output population differs`);
+    }
+    for (const path of paths) {
+      const absolute = resolve(artifactsDir, path);
+      const fromRoot = relative(resolve(artifactsDir), absolute);
+      if (fromRoot.startsWith(`..${sep}`) || fromRoot === '..') {
+        throw new VerificationError('ARTIFACT_PATH_ESCAPE', `artifact ${path} escapes its bundle`);
+      }
+      let stat;
+      try {
+        stat = lstatSync(absolute);
+      } catch (error) {
+        throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unreadable: ${error.message}`);
+      }
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new VerificationError('ARTIFACT_INVALID', `artifact ${path} is not a regular file`);
+      }
+      const actualDigest = sha256Hex(readFileSync(absolute));
+      if (result.outputDigests[path] !== actualDigest) {
+        throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `artifact ${path} digest does not match`);
+      }
+    }
+  }
+  return expectedPaths;
 }
 
 export function verifyCandidateEvidence({
@@ -187,6 +282,8 @@ export function verifyCandidateEvidence({
   expectedCommit,
   expectedTree,
   expectedPolicyDigest,
+  bindingMode = 'exact-commit',
+  artifactsDir,
 }) {
   validateTaskPolicy(taskPolicy);
   validateTrustStore(trustStore);
@@ -195,6 +292,9 @@ export function verifyCandidateEvidence({
   assertString(expectedCommit, 'expected commit', GIT_OBJECT);
   assertString(expectedTree, 'expected tree', GIT_OBJECT);
   assertString(expectedPolicyDigest, 'expected policy digest', SHA256);
+  if (bindingMode !== 'exact-commit' && bindingMode !== 'exact-tree') {
+    throw new VerificationError('SCHEMA_INVALID', 'binding mode must be exact-commit or exact-tree');
+  }
 
   const actualPolicyDigest = sha256Hex(taskPolicy);
   if (actualPolicyDigest !== expectedPolicyDigest) {
@@ -238,7 +338,7 @@ export function verifyCandidateEvidence({
   if (receipt.repository.id !== expectedRepository) {
     throw new VerificationError('REPOSITORY_MISMATCH', 'candidate receipt repository does not match');
   }
-  if (receipt.repository.commit !== expectedCommit) {
+  if (bindingMode === 'exact-commit' && receipt.repository.commit !== expectedCommit) {
     throw new VerificationError('COMMIT_MISMATCH', 'candidate receipt commit does not match');
   }
   if (receipt.repository.tree !== expectedTree) {
@@ -298,15 +398,20 @@ export function verifyCandidateEvidence({
     }
   }
 
+  const verifiedArtifacts = verifyArtifacts(taskPolicy, results, artifactsDir);
+
   return {
     ok: true,
     repository: expectedRepository,
     commit: expectedCommit,
+    evidenceCommit: receipt.repository.commit,
     tree: expectedTree,
+    binding: bindingMode,
     profile: receipt.profile,
     signerId: signature.signerId,
     policyDigest: expectedPolicyDigest,
     verifiedNodes: expectedIds,
+    verifiedArtifacts,
   };
 }
 

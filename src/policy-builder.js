@@ -415,7 +415,11 @@ export function buildExpectedTaskPolicy({
   baseCommit,
   toolchain,
   environment,
+  policySchemaVersion = '1.0.0',
 }) {
+  if (policySchemaVersion !== '1.0.0' && policySchemaVersion !== '1.1.0') {
+    throw new VerificationError('SCHEMA_INVALID', 'unsupported task-policy schemaVersion');
+  }
   validateDescriptor(descriptor);
   validateStringMap(toolchain, 'toolchain');
   validateEnvironmentMap(environment, 'environment');
@@ -497,13 +501,17 @@ export function buildExpectedTaskPolicy({
   }
   const requiredNodes = ordered
     .filter((task) => selected.has(task.nodeId))
-    .map((task) => ({
-      nodeId: task.nodeId,
-      taskKey: taskKeys.get(task.nodeId),
-      dependencies: [...task.dependencies],
-    }));
+    .map((task) => {
+      const node = {
+        nodeId: task.nodeId,
+        taskKey: taskKeys.get(task.nodeId),
+        dependencies: [...task.dependencies],
+      };
+      if (policySchemaVersion === '1.1.0') node.outputContract = task.outputContract;
+      return node;
+    });
   const taskPolicy = {
-    schemaVersion: '1.0.0',
+    schemaVersion: policySchemaVersion,
     repositoryId: descriptor.repositoryId,
     requiredNodes,
   };

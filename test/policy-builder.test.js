@@ -180,6 +180,32 @@ describe('selector semantics', () => {
   });
 });
 
+describe('task-policy schema compatibility', () => {
+  it('emits output contracts only in schema 1.1 policies', () => {
+    const state = repository();
+    const legacy = build({
+      repo: state.repo,
+      base: state.base,
+      candidate: state.base,
+      profileId: 'rc',
+    });
+    const portable = build({
+      repo: state.repo,
+      base: state.base,
+      candidate: state.base,
+      profileId: 'rc',
+      policySchemaVersion: '1.1.0',
+    });
+    assert.equal(legacy.taskPolicy.schemaVersion, '1.0.0');
+    assert.equal(Object.hasOwn(legacy.taskPolicy.requiredNodes[0], 'outputContract'), false);
+    assert.equal(portable.taskPolicy.schemaVersion, '1.1.0');
+    assert.deepEqual(portable.taskPolicy.requiredNodes[0].outputContract, {
+      kind: 'files',
+      paths: ['generated.json'],
+    });
+  });
+});
+
 describe('candidate snapshot and affected derivation', () => {
   it('selects source, helper, config, lockfile, and test changes with dependency closure', () => {
     const mutations = [

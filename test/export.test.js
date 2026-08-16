@@ -37,7 +37,7 @@ function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
 
-function fixture({ allowlistedEnv = [], environmentValue = {} } = {}) {
+function fixture({ allowlistedEnv = [], environmentValue = {}, portable = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'devai-export-test-'));
   temporaryDirectories.push(root);
   const repo = join(root, 'candidate');
@@ -61,12 +61,15 @@ function fixture({ allowlistedEnv = [], environmentValue = {} } = {}) {
         inputSelectors: [{ kind: 'exact', pattern: 'input.txt' }],
         toolchainKeys: ['node'],
         allowlistedEnv,
-        outputContract: { kind: 'node-test', requiredResult: 'pass' },
+        outputContract: portable
+          ? { kind: 'files', paths: ['generated.json'], requiredResult: 'pass' }
+          : { kind: 'node-test', requiredResult: 'pass' },
       },
     ],
     profiles: [{ profileId: 'rc', mode: 'fixed', requiredNodes: ['test:one'] }],
   };
   put(join(repo, 'input.txt'), 'input\n');
+  if (portable) put(join(repo, 'generated.json'), '{"proof":true}\n');
   put(join(repo, 'test-tasks.json'), `${JSON.stringify(descriptor, null, 2)}\n`);
   git(repo, ['add', '-A']);
   git(repo, ['commit', '--quiet', '-m', 'candidate']);
@@ -84,6 +87,7 @@ function fixture({ allowlistedEnv = [], environmentValue = {} } = {}) {
     expectedTree: tree,
     toolchain: { node: 'v24.5.0' },
     environment: environmentValue,
+    policySchemaVersion: portable ? '1.1.0' : '1.0.0',
   });
   const result = {
     schemaVersion: '1.0.0',
@@ -92,7 +96,13 @@ function fixture({ allowlistedEnv = [], environmentValue = {} } = {}) {
     status: 'PASS',
     inputDigest: '1'.repeat(64),
     dependencyResultDigests: {},
-    outputDigests: { stdout: '2'.repeat(64) },
+    outputDigests: {
+      stdout: '2'.repeat(64),
+      ...(portable && {
+        stderr: '3'.repeat(64),
+        'generated.json': sha256Hex(readFileSync(join(repo, 'generated.json'))),
+      }),
+    },
     startedAt: '2026-08-10T00:00:00.000Z',
     finishedAt: '2026-08-10T00:00:01.000Z',
   };
@@ -101,7 +111,7 @@ function fixture({ allowlistedEnv = [], environmentValue = {} } = {}) {
   mkdirSync(resultsDir);
   put(join(resultsDir, `${resultDigest}.json`), canonicalize(result));
   const receipt = {
-    schemaVersion: '1.0.0',
+    schemaVersion: portable ? '1.1.0' : '1.0.0',
     repository: { id: descriptor.repositoryId, commit, tree },
     profile: 'rc',
     taskPolicyDigest: built.taskPolicyDigest,
@@ -178,6 +188,48 @@ describe('trusted candidate evidence export', () => {
     assert.equal(absentResult.taskPolicyDigest, absent.built.taskPolicyDigest);
     assert.equal(emptyResult.taskPolicyDigest, empty.built.taskPolicyDigest);
     assert.notEqual(absentResult.taskPolicyDigest, emptyResult.taskPolicyDigest);
+  });
+
+  it('exports and independently verifies exactly the declared schema 1.1 artifacts', () => {
+    const state = fixture({ portable: true });
+    const result = exportCandidateEvidence(exportOptions(state));
+    assert.equal(result.ok, true);
+    assert.equal(readFileSync(join(state.outputDir, 'artifacts/generated.json'), 'utf8'), '{"proof":true}\n');
+    const manifest = JSON.parse(readFileSync(join(state.outputDir, 'manifest.json'), 'utf8'));
+    assert.deepEqual(manifest.artifacts, [
+      {
+        path: 'generated.json',
+        mediaType: 'application/json',
+        sha256: sha256Hex(readFileSync(join(state.repo, 'generated.json'))),
+      },
+    ]);
+    const verified = loadAndVerify({
+      envelopePath: join(state.outputDir, 'envelope.json'),
+      resultsDir: join(state.outputDir, 'results'),
+      artifactsDir: join(state.outputDir, 'artifacts'),
+      taskPolicyPath: join(state.outputDir, 'task-policy.json'),
+      trustStorePath: join(state.outputDir, 'trust-store.json'),
+      expectedRepository: 'fixture/repository',
+      expectedCommit: state.commit,
+      expectedTree: state.tree,
+      expectedPolicyDigest: state.built.taskPolicyDigest,
+    });
+    assert.deepEqual(verified.verifiedArtifacts, ['generated.json']);
+
+    put(join(state.outputDir, 'artifacts/generated.json'), '{"proof":false}\n');
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () =>
+      loadAndVerify({
+        envelopePath: join(state.outputDir, 'envelope.json'),
+        resultsDir: join(state.outputDir, 'results'),
+        artifactsDir: join(state.outputDir, 'artifacts'),
+        taskPolicyPath: join(state.outputDir, 'task-policy.json'),
+        trustStorePath: join(state.outputDir, 'trust-store.json'),
+        expectedRepository: 'fixture/repository',
+        expectedCommit: state.commit,
+        expectedTree: state.tree,
+        expectedPolicyDigest: state.built.taskPolicyDigest,
+      }),
+    );
   });
 
   it('refuses dirty candidates before signing', () => {

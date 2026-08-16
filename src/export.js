@@ -106,6 +106,33 @@ function validateSignerId(value) {
   if (!IDENTIFIER.test(value)) throw new VerificationError('SCHEMA_INVALID', 'signer ID is invalid');
 }
 
+function copyRegularFile(source, destination, label) {
+  let stat;
+  try {
+    stat = lstatSync(source);
+  } catch (error) {
+    throw new VerificationError('INPUT_MISSING', `${label} is unreadable: ${error.message}`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new VerificationError('ARTIFACT_INVALID', `${label} must be a regular non-symlink file`);
+  }
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+}
+
+function declaredArtifactPaths(taskPolicy) {
+  const paths = new Set();
+  if (taskPolicy.schemaVersion !== '1.1.0') return [];
+  for (const node of taskPolicy.requiredNodes) {
+    for (const path of node.outputContract.paths ?? []) paths.add(path);
+  }
+  return [...paths].sort();
+}
+
+function artifactMediaType(path) {
+  return path.endsWith('.json') ? 'application/json' : 'application/octet-stream';
+}
+
 export function exportCandidateEvidence({
   repo,
   receiptPath,
@@ -132,6 +159,7 @@ export function exportCandidateEvidence({
   if (existsSync(output)) throw new VerificationError('OUTPUT_EXISTS', 'output directory already exists');
 
   const descriptor = readCommittedDescriptor(repository, commit);
+  const receipt = readJson(receiptPath, 'candidate receipt');
   const built = buildExpectedTaskPolicy({
     repo: repository,
     descriptor,
@@ -141,8 +169,8 @@ export function exportCandidateEvidence({
     baseCommit,
     toolchain: readStringMap(controlledToolchain, 'toolchain'),
     environment: readEnvironmentMap(controlledEnvironment, 'environment'),
+    policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
   });
-  const receipt = readJson(receiptPath, 'candidate receipt');
   const payload = canonicalBytes(receipt);
   const keys = matchingKeyPair(controlledPrivateKey, controlledPublicKey);
   const envelope = {
@@ -164,30 +192,48 @@ export function exportCandidateEvidence({
     revokedSignerIds: [],
   };
 
-  verifyCandidateEvidence({
-    envelope,
-    resultsDir,
-    taskPolicy: built.taskPolicy,
-    trustStore,
-    expectedRepository: descriptor.repositoryId,
-    expectedCommit: commit,
-    expectedTree: tree,
-    expectedPolicyDigest: built.taskPolicyDigest,
-  });
-
   const staging = mkdtempSync(join(dirname(output), '.devai-evidence-export-'));
   try {
     mkdirSync(join(staging, 'results'));
+    mkdirSync(join(staging, 'artifacts'));
     writeFileSync(join(staging, 'envelope.json'), `${canonicalize(envelope)}\n`, { flag: 'wx' });
     writeFileSync(join(staging, 'task-policy.json'), `${canonicalize(built.taskPolicy)}\n`, {
       flag: 'wx',
     });
     writeFileSync(join(staging, 'trust-store.json'), `${canonicalize(trustStore)}\n`, { flag: 'wx' });
     for (const task of receipt.tasks) {
-      copyFileSync(join(resultsDir, `${task.resultDigest}.json`), join(staging, 'results', `${task.resultDigest}.json`));
+      copyRegularFile(
+        join(resultsDir, `${task.resultDigest}.json`),
+        join(staging, 'results', `${task.resultDigest}.json`),
+        `task result ${task.nodeId}`,
+      );
     }
+    const artifactPaths = declaredArtifactPaths(built.taskPolicy);
+    for (const path of artifactPaths) {
+      const segments = path.split('/');
+      let cursor = repository;
+      for (const segment of segments) {
+        cursor = join(cursor, segment);
+        const stat = lstatSync(cursor);
+        if (stat.isSymbolicLink()) {
+          throw new VerificationError('ARTIFACT_SYMLINK', `artifact ${path} traverses a symbolic link`);
+        }
+      }
+      copyRegularFile(cursor, join(staging, 'artifacts', path), `artifact ${path}`);
+    }
+    const verified = verifyCandidateEvidence({
+      envelope,
+      resultsDir: join(staging, 'results'),
+      artifactsDir: join(staging, 'artifacts'),
+      taskPolicy: built.taskPolicy,
+      trustStore,
+      expectedRepository: descriptor.repositoryId,
+      expectedCommit: commit,
+      expectedTree: tree,
+      expectedPolicyDigest: built.taskPolicyDigest,
+    });
     const manifest = {
-      schemaVersion: '1.0.0',
+      schemaVersion: built.taskPolicy.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
       repositoryId: descriptor.repositoryId,
       commit,
       tree,
@@ -196,6 +242,13 @@ export function exportCandidateEvidence({
       taskPolicyDigest: built.taskPolicyDigest,
       envelopeDigest: sha256Hex(envelope),
       resultDigests: receipt.tasks.map((task) => task.resultDigest).sort(),
+      ...(built.taskPolicy.schemaVersion === '1.1.0' && {
+        artifacts: verified.verifiedArtifacts.map((path) => ({
+          path,
+          mediaType: artifactMediaType(path),
+          sha256: sha256Hex(readFileSync(join(staging, 'artifacts', path))),
+        })),
+      }),
     };
     writeFileSync(join(staging, 'manifest.json'), `${canonicalize(manifest)}\n`, { flag: 'wx' });
     renameSync(staging, output);

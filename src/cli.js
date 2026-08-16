@@ -12,6 +12,7 @@ const names = new Set([
   'tree',
   'policy-digest',
 ]);
+const optionalNames = new Set(['artifacts-dir', 'binding']);
 
 function emitError(code, message, exitCode) {
   process.stderr.write(`${JSON.stringify({ ok: false, code, message })}\n`);
@@ -27,7 +28,7 @@ function parseArguments(argv) {
       throw new VerificationError('USAGE', 'arguments must be --name value pairs');
     }
     const name = token.slice(2);
-    if (!names.has(name) || values[name] !== undefined) {
+    if ((!names.has(name) && !optionalNames.has(name)) || values[name] !== undefined) {
       throw new VerificationError('USAGE', `unknown or duplicate argument --${name}`);
     }
     values[name] = value;
@@ -50,6 +51,8 @@ try {
     expectedCommit: values.commit,
     expectedTree: values.tree,
     expectedPolicyDigest: values['policy-digest'],
+    bindingMode: values.binding ?? 'exact-commit',
+    artifactsDir: values['artifacts-dir'],
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
