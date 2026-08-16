@@ -17,7 +17,7 @@ const requiredNames = new Set([
   'environment',
   'output',
 ]);
-const optionalNames = new Set(['base']);
+const optionalNames = new Set(['base', 'schema-version']);
 
 function parseArguments(argv) {
   const values = {};
@@ -56,6 +56,7 @@ try {
     baseCommit: values.base,
     toolchain: readStringMap(values.toolchain, 'toolchain'),
     environment: readEnvironmentMap(values.environment, 'environment'),
+    policySchemaVersion: values['schema-version'] ?? '1.0.0',
   });
   writeFileSync(values.output, `${canonicalize(built.taskPolicy)}\n`, { flag: 'wx' });
   process.stdout.write(

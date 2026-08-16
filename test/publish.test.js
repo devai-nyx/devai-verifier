@@ -152,6 +152,34 @@ describe('protected evidence publication', () => {
     assert.equal(dispatched[0].candidateCommit, state.commit);
   });
 
+  it('accepts a byte-identical merged-main tree only in exact-tree mode', () => {
+    const state = fixture();
+    const mergedCommit = 'c'.repeat(40);
+    expectCode('COMMIT_MISMATCH', () =>
+      verifyPreparedBundle({
+        bundleDir: state.bundle,
+        trustStorePath: state.trustStorePath,
+        expectedRepository: 'fixture/repository',
+        expectedCommit: mergedCommit,
+        expectedTree: state.tree,
+        expectedPolicyDigest: JSON.parse(readFileSync(join(state.bundle, 'manifest.json'), 'utf8'))
+          .taskPolicyDigest,
+      }),
+    );
+    const verified = verifyPreparedBundle({
+      bundleDir: state.bundle,
+      trustStorePath: state.trustStorePath,
+      expectedRepository: 'fixture/repository',
+      expectedCommit: mergedCommit,
+      expectedTree: state.tree,
+      expectedPolicyDigest: JSON.parse(readFileSync(join(state.bundle, 'manifest.json'), 'utf8'))
+        .taskPolicyDigest,
+      bindingMode: 'exact-tree',
+    });
+    assert.equal(verified.verified.binding, 'exact-tree');
+    assert.equal(verified.verified.evidenceCommit, state.commit);
+  });
+
   it('rejects extra files and an existing tag with different valid evidence bytes', () => {
     const extra = fixture();
     put(join(extra.bundle, 'unexpected.txt'), 'unexpected\n');

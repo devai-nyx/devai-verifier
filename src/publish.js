@@ -122,10 +122,34 @@ function validateManifest(manifest) {
   assertUniqueStrings(paths, 'manifest artifact paths');
 }
 
-export function verifyPreparedBundle({ bundleDir, trustStorePath }) {
+export function verifyPreparedBundle({
+  bundleDir,
+  trustStorePath,
+  expectedRepository,
+  expectedCommit,
+  expectedTree,
+  expectedPolicyDigest,
+  bindingMode = 'exact-commit',
+}) {
   const bundle = realpathSync(bundleDir);
   const manifest = canonicalJson(join(bundle, 'manifest.json'), 'evidence manifest');
   validateManifest(manifest);
+  const repository = expectedRepository ?? manifest.repositoryId;
+  const commit = expectedCommit ?? manifest.commit;
+  const tree = expectedTree ?? manifest.tree;
+  const policyDigest = expectedPolicyDigest ?? manifest.taskPolicyDigest;
+  if (manifest.repositoryId !== repository) {
+    throw new VerificationError('REPOSITORY_MISMATCH', 'manifest repository differs from candidate');
+  }
+  if (bindingMode === 'exact-commit' && manifest.commit !== commit) {
+    throw new VerificationError('COMMIT_MISMATCH', 'manifest commit differs from candidate');
+  }
+  if (manifest.tree !== tree) {
+    throw new VerificationError('TREE_MISMATCH', 'manifest tree differs from candidate');
+  }
+  if (manifest.taskPolicyDigest !== policyDigest) {
+    throw new VerificationError('POLICY_DIGEST_MISMATCH', 'manifest policy differs from expected policy');
+  }
   const expectedFiles = [
     'envelope.json',
     'manifest.json',
@@ -163,11 +187,11 @@ export function verifyPreparedBundle({ bundleDir, trustStorePath }) {
     artifactsDir: join(bundle, 'artifacts'),
     taskPolicyPath: join(bundle, 'task-policy.json'),
     trustStorePath,
-    expectedRepository: manifest.repositoryId,
-    expectedCommit: manifest.commit,
-    expectedTree: manifest.tree,
-    expectedPolicyDigest: manifest.taskPolicyDigest,
-    bindingMode: 'exact-commit',
+    expectedRepository: repository,
+    expectedCommit: commit,
+    expectedTree: tree,
+    expectedPolicyDigest: policyDigest,
+    bindingMode,
   });
   if (verified.signerId !== manifest.signerId) {
     throw new VerificationError('SIGNER_MISMATCH', 'manifest signer differs from signed envelope');
