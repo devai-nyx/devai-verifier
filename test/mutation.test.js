@@ -52,7 +52,7 @@ function fixture() {
       'src/core.ts': {
         language: 'typescript',
         mutants: [
-          { id: '0', status: 'Killed' },
+          { id: '0', status: 'Killed', replacement: '/[a-z]+/u' },
           { id: '1', status: 'Survived' },
           { id: '2', status: 'CompileError' },
         ],

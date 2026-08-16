@@ -191,25 +191,21 @@ function readCanonicalJson(path, label) {
   return { value, bytes: Buffer.from(text.endsWith('\n') ? text.slice(0, -1) : text, 'utf8') };
 }
 
-function containsAbsolutePath(value) {
-  if (typeof value === 'string') {
-    return value.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('file:///');
-  }
-  if (Array.isArray(value)) return value.some(containsAbsolutePath);
-  if (value !== null && typeof value === 'object') return Object.values(value).some(containsAbsolutePath);
-  return false;
-}
-
 function reportMetrics(report, label) {
   assertObject(report, label);
   assertObject(report.files, `${label}.files`);
+  assertObject(report.testFiles, `${label}.testFiles`);
+  assertObject(report.config, `${label}.config`);
+  if (Object.keys(report.config).length !== 0) {
+    throw new VerificationError('MUTATION_REPORT_INVALID', `${label}.config must be normalized to {}`);
+  }
   assertObject(report.thresholds, `${label}.thresholds`);
   validateThresholds(report.thresholds, `${label}.thresholds`);
   if (report.projectRoot !== '.') {
     throw new VerificationError('MUTATION_REPORT_INVALID', `${label}.projectRoot must be normalized to .`);
   }
-  if (containsAbsolutePath(report)) {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label} contains an absolute workstation path`);
+  for (const testFile of Object.keys(report.testFiles)) {
+    assertString(testFile, `${label} test file`, PORTABLE_PATH);
   }
   const totals = Object.fromEntries(MUTANT_STATUSES.map((status) => [status, 0]));
   for (const [file, fileResult] of Object.entries(report.files)) {
