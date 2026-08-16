@@ -480,6 +480,123 @@ describe('fail-closed descriptor and Git boundaries', () => {
   });
 });
 
+describe('mutation output discovery', () => {
+  function mutationDescriptor() {
+    return {
+      schemaVersion: '1.0.0',
+      descriptorVersion: 'mutation-discovery-1',
+      repositoryId: 'fixture-repository',
+      fallbackNodeId: null,
+      dynamicFallbackSelectors: [],
+      tasks: [
+        task({
+          nodeId: 'test:mutation',
+          inputSelectors: [
+            { kind: 'glob', pattern: 'packages/*/package.json' },
+            { kind: 'glob', pattern: 'packages/*/stryker.*' },
+            { kind: 'exact', pattern: 'tools/repo-config/test-policy.json' },
+          ],
+          outputContract: {
+            kind: 'mutation-report-set-discovery-v1',
+            workspaceRoots: ['packages'],
+            testPolicyPath: 'tools/repo-config/test-policy.json',
+            artifactRoot: '.devai/local/evidence/mutation',
+            summaryPath: '.devai/local/evidence/mutation/summary.json',
+          },
+        }),
+      ],
+      profiles: [{ profileId: 'rc', mode: 'fixed', requiredNodes: ['test:mutation'] }],
+    };
+  }
+
+  it('derives the exact package roster and thresholds from committed candidate inputs', () => {
+    const state = repository();
+    put(
+      state.repo,
+      'tools/repo-config/test-policy.json',
+      JSON.stringify({
+        policies: { mutation: { tier3: { break: 90, high: 100, low: 90 } } },
+        defaults: { mutation: 'tier3' },
+        perPackage: {},
+      }),
+    );
+    put(
+      state.repo,
+      'packages/core/package.json',
+      JSON.stringify({ name: '@stynx/core', scripts: { stryker: 'stryker run' } }),
+    );
+    put(state.repo, 'packages/core/stryker.conf.mjs', 'export default {}\n');
+    put(
+      state.repo,
+      'packages/plain/package.json',
+      JSON.stringify({ name: '@stynx/plain', scripts: { test: 'node --test' } }),
+    );
+    const first = commit(state.repo, 'one mutation package');
+    const firstPolicy = build({
+      repo: state.repo,
+      candidate: first,
+      profileId: 'rc',
+      policy: mutationDescriptor(),
+      policySchemaVersion: '1.1.0',
+    });
+    const firstNode = firstPolicy.taskPolicy.requiredNodes[0];
+    assert.equal(firstNode.outputContract.expectedPackageCount, 1);
+    assert.deepEqual(firstNode.outputContract.packages, [
+      {
+        packageName: '@stynx/core',
+        workspace: 'packages/core',
+        resultPath: '.devai/local/evidence/mutation/packages-core.result.json',
+        reportPath: '.devai/local/evidence/mutation/packages-core.stryker.json',
+        thresholds: { break: 90, high: 100, low: 90 },
+      },
+    ]);
+
+    put(
+      state.repo,
+      'packages/extra/package.json',
+      JSON.stringify({ name: '@stynx/extra', scripts: { stryker: 'stryker run' } }),
+    );
+    put(state.repo, 'packages/extra/stryker.config.mjs', 'export default {}\n');
+    const second = commit(state.repo, 'two mutation packages');
+    const secondPolicy = build({
+      repo: state.repo,
+      candidate: second,
+      profileId: 'rc',
+      policy: mutationDescriptor(),
+      policySchemaVersion: '1.1.0',
+    });
+    assert.equal(secondPolicy.taskPolicy.requiredNodes[0].outputContract.expectedPackageCount, 2);
+    assert.notEqual(firstNode.taskKey, secondPolicy.taskPolicy.requiredNodes[0].taskKey);
+  });
+
+  it('fails closed when a Stryker command and configuration are not paired', () => {
+    const state = repository();
+    put(
+      state.repo,
+      'tools/repo-config/test-policy.json',
+      JSON.stringify({
+        policies: { mutation: { default: 90 } },
+        defaults: { mutation: 'default' },
+      }),
+    );
+    put(
+      state.repo,
+      'packages/broken/package.json',
+      JSON.stringify({ name: '@stynx/broken', scripts: { stryker: 'stryker run' } }),
+    );
+    const candidate = commit(state.repo, 'broken mutation package');
+    expectCode('MUTATION_ROSTER_MISMATCH', () =>
+      build({
+        repo: state.repo,
+        candidate,
+        profileId: 'rc',
+        policy: mutationDescriptor(),
+        policySchemaVersion: '1.1.0',
+      }),
+    );
+  });
+});
+
 describe('policy-builder CLI', () => {
   it('writes the exact verifier policy and reports its digest', () => {
     const state = repository();

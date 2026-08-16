@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -23,6 +24,124 @@ const MUTANT_STATUSES = [
   'Survived',
   'Timeout',
 ];
+const STRYKER_CONFIG = /^stryker\.(?:conf|config)\.(?:cjs|js|json|mjs|ts)$/u;
+
+function git(repo, args) {
+  const result = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new VerificationError('GIT_ERROR', result.stderr.trim() || `git ${args[0]} failed`);
+  }
+  return result.stdout;
+}
+
+function committedJson(repo, commit, path, label) {
+  try {
+    return JSON.parse(git(repo, ['show', `${commit}:${path}`]));
+  } catch (error) {
+    if (error instanceof VerificationError) throw error;
+    throw new VerificationError('MUTATION_ROSTER_MISMATCH', `${label} is not valid JSON`);
+  }
+}
+
+function mutationThresholds(policy, packageName) {
+  const override = policy.perPackage?.[packageName]?.mutation;
+  if (typeof override === 'number') {
+    return { break: override, high: override, low: Math.max(60, override - 10) };
+  }
+  const policyName = override ?? policy.defaults?.mutation ?? 'default';
+  const selected = policy.policies?.mutation?.[policyName];
+  if (typeof selected === 'number') {
+    return { break: selected, high: selected, low: Math.max(60, selected - 10) };
+  }
+  if (selected !== null && typeof selected === 'object' && typeof selected.break === 'number') {
+    return {
+      break: selected.break,
+      high: typeof selected.high === 'number' ? selected.high : selected.break,
+      low: typeof selected.low === 'number' ? selected.low : Math.max(60, selected.break - 10),
+    };
+  }
+  throw new VerificationError(
+    'MUTATION_THRESHOLD_MISMATCH',
+    `unknown mutation policy ${String(policyName)} for ${packageName}`,
+  );
+}
+
+export function resolveMutationDiscoveryContract(repo, commit, contract) {
+  if (contract.kind !== 'mutation-report-set-discovery-v1') return contract;
+  assertExactKeys(
+    contract,
+    ['artifactRoot', 'kind', 'summaryPath', 'testPolicyPath', 'workspaceRoots'],
+    'mutation discovery contract',
+  );
+  assertString(contract.artifactRoot, 'mutation discovery artifactRoot', PORTABLE_PATH);
+  assertString(contract.summaryPath, 'mutation discovery summaryPath', PORTABLE_PATH);
+  assertString(contract.testPolicyPath, 'mutation discovery testPolicyPath', PORTABLE_PATH);
+  assertUniqueStrings(contract.workspaceRoots, 'mutation discovery workspaceRoots');
+  for (const root of contract.workspaceRoots) {
+    assertString(root, 'mutation discovery workspace root', PORTABLE_PATH);
+  }
+  if (contract.summaryPath !== `${contract.artifactRoot}/summary.json`) {
+    throw new VerificationError(
+      'SCHEMA_INVALID',
+      'mutation discovery summaryPath must be artifactRoot/summary.json',
+    );
+  }
+
+  const paths = git(repo, ['ls-tree', '-r', '--name-only', commit])
+    .trim()
+    .split('\n')
+    .filter(Boolean);
+  const testPolicy = committedJson(repo, commit, contract.testPolicyPath, 'mutation test policy');
+  const packages = [];
+  for (const root of contract.workspaceRoots) {
+    const prefix = `${root}/`;
+    const manifests = paths.filter((path) => {
+      if (!path.startsWith(prefix) || !path.endsWith('/package.json')) return false;
+      return path.slice(prefix.length).split('/').length === 2;
+    });
+    for (const manifestPath of manifests) {
+      const workspace = manifestPath.slice(0, -'/package.json'.length);
+      const manifest = committedJson(repo, commit, manifestPath, `manifest ${manifestPath}`);
+      const strykerScript = manifest.scripts?.stryker;
+      const configs = paths.filter((path) => {
+        if (!path.startsWith(`${workspace}/`)) return false;
+        const relative = path.slice(workspace.length + 1);
+        return !relative.includes('/') && STRYKER_CONFIG.test(relative);
+      });
+      if (configs.length > 1 || (configs.length === 1) !== (typeof strykerScript === 'string')) {
+        throw new VerificationError(
+          'MUTATION_ROSTER_MISMATCH',
+          `${workspace} must declare exactly one Stryker command and configuration together`,
+        );
+      }
+      if (configs.length === 0) continue;
+      assertString(manifest.name, `manifest ${manifestPath} package name`, PACKAGE_NAME);
+      const stem = workspace.replaceAll('/', '-');
+      packages.push({
+        packageName: manifest.name,
+        workspace,
+        resultPath: `${contract.artifactRoot}/${stem}.result.json`,
+        reportPath: `${contract.artifactRoot}/${stem}.stryker.json`,
+        thresholds: mutationThresholds(testPolicy, manifest.name),
+      });
+    }
+  }
+  packages.sort((left, right) => left.packageName.localeCompare(right.packageName));
+  if (packages.length === 0 || new Set(packages.map((entry) => entry.packageName)).size !== packages.length) {
+    throw new VerificationError('MUTATION_ROSTER_MISMATCH', 'mutation package roster is empty or duplicated');
+  }
+  const artifactPaths = [
+    contract.summaryPath,
+    ...packages.flatMap((entry) => [entry.resultPath, entry.reportPath]),
+  ];
+  return {
+    kind: 'mutation-report-set-v1',
+    expectedPackageCount: packages.length,
+    summaryPath: contract.summaryPath,
+    packages,
+    paths: artifactPaths,
+  };
+}
 
 function assertNonnegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) {

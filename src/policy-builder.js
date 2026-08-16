@@ -9,6 +9,7 @@ import {
   canonicalBytes,
   sha256Hex,
 } from './canonical.js';
+import { resolveMutationDiscoveryContract } from './mutation.js';
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -453,6 +454,12 @@ export function buildExpectedTaskPolicy({
     repo,
     entries.map((entry) => entry.objectId),
   );
+  const outputContracts = new Map(
+    ordered.map((task) => [
+      task.nodeId,
+      resolveMutationDiscoveryContract(repo, candidateCommit, task.outputContract),
+    ]),
+  );
   const taskKeys = new Map();
   for (const task of ordered) {
     if (!selected.has(task.nodeId)) continue;
@@ -493,7 +500,7 @@ export function buildExpectedTaskPolicy({
         runner: task.runner,
         toolchain: selectedToolchain,
         environment: selectedEnvironment,
-        outputContract: task.outputContract,
+        outputContract: outputContracts.get(task.nodeId),
         inputs,
         dependencies,
       }),
@@ -507,7 +514,7 @@ export function buildExpectedTaskPolicy({
         taskKey: taskKeys.get(task.nodeId),
         dependencies: [...task.dependencies],
       };
-      if (policySchemaVersion === '1.1.0') node.outputContract = task.outputContract;
+      if (policySchemaVersion === '1.1.0') node.outputContract = outputContracts.get(task.nodeId);
       return node;
     });
   const taskPolicy = {
