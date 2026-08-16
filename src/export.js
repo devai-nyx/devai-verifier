@@ -200,7 +200,9 @@ export function exportCandidateEvidence({
     writeFileSync(join(staging, 'task-policy.json'), `${canonicalize(built.taskPolicy)}\n`, {
       flag: 'wx',
     });
-    writeFileSync(join(staging, 'trust-store.json'), `${canonicalize(trustStore)}\n`, { flag: 'wx' });
+    if (built.taskPolicy.schemaVersion === '1.0.0') {
+      writeFileSync(join(staging, 'trust-store.json'), `${canonicalize(trustStore)}\n`, { flag: 'wx' });
+    }
     for (const task of receipt.tasks) {
       copyRegularFile(
         join(resultsDir, `${task.resultDigest}.json`),

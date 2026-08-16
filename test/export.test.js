@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -123,8 +124,22 @@ function fixture({ allowlistedEnv = [], environmentValue = {}, portable = false 
   const keys = generateKeyPairSync('ed25519');
   const privateKeyPath = join(root, 'private.pem');
   const publicKeyPath = join(root, 'public.pem');
+  const trustStorePath = join(root, 'trust-store.json');
   put(privateKeyPath, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }));
   put(publicKeyPath, keys.publicKey.export({ type: 'spki', format: 'pem' }));
+  put(
+    trustStorePath,
+    canonicalize({
+      schemaVersion: '1.0.0',
+      trustedSigners: [
+        {
+          signerId: 'local-rc-signer',
+          publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+        },
+      ],
+      revokedSignerIds: [],
+    }),
+  );
   return {
     root,
     repo,
@@ -136,6 +151,7 @@ function fixture({ allowlistedEnv = [], environmentValue = {}, portable = false 
     receiptPath,
     privateKeyPath,
     publicKeyPath,
+    trustStorePath,
     outputDir: join(root, 'exported'),
     built,
   };
@@ -168,7 +184,7 @@ describe('trusted candidate evidence export', () => {
       envelopePath: join(state.outputDir, 'envelope.json'),
       resultsDir: join(state.outputDir, 'results'),
       taskPolicyPath: join(state.outputDir, 'task-policy.json'),
-      trustStorePath: join(state.outputDir, 'trust-store.json'),
+      trustStorePath: state.trustStorePath,
       expectedRepository: 'fixture/repository',
       expectedCommit: state.commit,
       expectedTree: state.tree,
@@ -194,6 +210,7 @@ describe('trusted candidate evidence export', () => {
     const state = fixture({ portable: true });
     const result = exportCandidateEvidence(exportOptions(state));
     assert.equal(result.ok, true);
+    assert.equal(existsSync(join(state.outputDir, 'trust-store.json')), false);
     assert.equal(readFileSync(join(state.outputDir, 'artifacts/generated.json'), 'utf8'), '{"proof":true}\n');
     const manifest = JSON.parse(readFileSync(join(state.outputDir, 'manifest.json'), 'utf8'));
     assert.deepEqual(manifest.artifacts, [
@@ -208,7 +225,7 @@ describe('trusted candidate evidence export', () => {
       resultsDir: join(state.outputDir, 'results'),
       artifactsDir: join(state.outputDir, 'artifacts'),
       taskPolicyPath: join(state.outputDir, 'task-policy.json'),
-      trustStorePath: join(state.outputDir, 'trust-store.json'),
+      trustStorePath: state.trustStorePath,
       expectedRepository: 'fixture/repository',
       expectedCommit: state.commit,
       expectedTree: state.tree,
@@ -223,7 +240,7 @@ describe('trusted candidate evidence export', () => {
         resultsDir: join(state.outputDir, 'results'),
         artifactsDir: join(state.outputDir, 'artifacts'),
         taskPolicyPath: join(state.outputDir, 'task-policy.json'),
-        trustStorePath: join(state.outputDir, 'trust-store.json'),
+        trustStorePath: state.trustStorePath,
         expectedRepository: 'fixture/repository',
         expectedCommit: state.commit,
         expectedTree: state.tree,
