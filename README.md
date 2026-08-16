@@ -15,6 +15,12 @@ The verifier accepts a canonical, Ed25519-signed candidate receipt and checks:
 - PASS-only reusable task results; and
 - schema 1.1 declared-output population and byte digests.
 
+The `mutation-report-set-v1` output contract is semantic, not opaque. The
+verifier independently checks the exact package and artifact roster, canonical
+JSON, normalized paths, Stryker status totals and score calculation, package
+thresholds, report/result digests, aggregate totals, and the complete/pass
+verdict. Absolute workstation paths and incomplete report sets are rejected.
+
 ## Trust boundary
 
 This is **trusted local attestation**, not proof that a test executed. A valid

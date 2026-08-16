@@ -11,6 +11,7 @@ import {
   readJson,
   sha256Hex,
 } from './canonical.js';
+import { validateMutationContract, verifyMutationReportSet } from './mutation.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -27,6 +28,7 @@ function validateOutputContract(contract, label) {
     throw new VerificationError('SCHEMA_INVALID', `${label}.paths must be nonempty when present`);
   }
   for (const path of contract.paths) assertString(path, `${label} path`, PORTABLE_PATH);
+  if (contract.kind === 'mutation-report-set-v1') validateMutationContract(contract, label);
 }
 
 function validateTaskPolicy(policy) {
@@ -221,7 +223,7 @@ function filesBelow(root, current = root) {
 
 function verifyArtifacts(policy, results, artifactsDir) {
   const expectedPaths = artifactPaths(policy);
-  if (expectedPaths.length === 0) return [];
+  if (expectedPaths.length === 0) return { paths: [], mutation: [] };
   if (typeof artifactsDir !== 'string') {
     throw new VerificationError('ARTIFACTS_MISSING', 'schema 1.1 output artifacts directory is required');
   }
@@ -270,7 +272,12 @@ function verifyArtifacts(policy, results, artifactsDir) {
       }
     }
   }
-  return expectedPaths;
+  const mutation = [];
+  for (const node of policy.requiredNodes) {
+    if (node.outputContract.kind !== 'mutation-report-set-v1') continue;
+    mutation.push({ nodeId: node.nodeId, ...verifyMutationReportSet(node.outputContract, artifactsDir) });
+  }
+  return { paths: expectedPaths, mutation };
 }
 
 export function verifyCandidateEvidence({
@@ -398,7 +405,7 @@ export function verifyCandidateEvidence({
     }
   }
 
-  const verifiedArtifacts = verifyArtifacts(taskPolicy, results, artifactsDir);
+  const verifiedArtifactSet = verifyArtifacts(taskPolicy, results, artifactsDir);
 
   return {
     ok: true,
@@ -411,7 +418,8 @@ export function verifyCandidateEvidence({
     signerId: signature.signerId,
     policyDigest: expectedPolicyDigest,
     verifiedNodes: expectedIds,
-    verifiedArtifacts,
+    verifiedArtifacts: verifiedArtifactSet.paths,
+    verifiedMutation: verifiedArtifactSet.mutation,
   };
 }
 
