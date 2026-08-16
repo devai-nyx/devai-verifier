@@ -18,6 +18,9 @@ import { buildExpectedTaskPolicy, selectorMatches } from '../src/policy-builder.
 const CLI = resolve(import.meta.dirname, '../src/build-policy-cli.js');
 const TOOLCHAIN = { node: '24.5.0', git: '2.50.1' };
 const ENVIRONMENT = { CI: 'false', IGNORED_SECRET: 'not-bound' };
+const PORTABLE_ENVIRONMENT = Object.fromEntries(
+  Object.entries(ENVIRONMENT).map(([key, value]) => [key, `sha256:${sha256Hex(value)}`]),
+);
 const temporaryDirectories = [];
 
 afterEach(() => {
@@ -141,7 +144,15 @@ function descriptor({ fallbackNodeId = 'full', dynamic = true } = {}) {
   };
 }
 
-function build({ repo, candidate, base, policy = descriptor(), profileId = 'affected', ...rest }) {
+function build({
+  repo,
+  candidate,
+  base,
+  policy = descriptor(),
+  profileId = 'affected',
+  environment,
+  ...rest
+}) {
   return buildExpectedTaskPolicy({
     repo,
     descriptor: policy,
@@ -150,7 +161,8 @@ function build({ repo, candidate, base, policy = descriptor(), profileId = 'affe
     expectedTree: candidate.tree,
     baseCommit: base?.commit,
     toolchain: TOOLCHAIN,
-    environment: ENVIRONMENT,
+    environment:
+      environment ?? (rest.policySchemaVersion === '1.1.0' ? PORTABLE_ENVIRONMENT : ENVIRONMENT),
     ...rest,
   });
 }
@@ -475,6 +487,15 @@ describe('fail-closed descriptor and Git boundaries', () => {
         candidate: state.base,
         profileId: 'rc',
         environment: { CI: false },
+      }),
+    );
+    expectCode('ENVIRONMENT_IDENTITY_INVALID', () =>
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policySchemaVersion: '1.1.0',
+        environment: ENVIRONMENT,
       }),
     );
   });

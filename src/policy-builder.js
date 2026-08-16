@@ -14,6 +14,7 @@ import { resolveMutationDiscoveryContract } from './mutation.js';
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const ENVIRONMENT_KEY = /^[A-Z_][A-Z0-9_]*$/u;
+const ENVIRONMENT_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
 
 function git(repo, args, { encoding = 'utf8', input } = {}) {
   const result = spawnSync('git', ['-C', repo, ...args], {
@@ -474,6 +475,16 @@ export function buildExpectedTaskPolicy({
     for (const key of [...task.allowlistedEnv].sort()) {
       if (!Object.hasOwn(environment, key)) {
         throw new VerificationError('ENVIRONMENT_MISSING', `task ${task.nodeId} requires environment ${key}`);
+      }
+      if (
+        policySchemaVersion === '1.1.0' &&
+        environment[key] !== null &&
+        !ENVIRONMENT_IDENTITY.test(environment[key])
+      ) {
+        throw new VerificationError(
+          'ENVIRONMENT_IDENTITY_INVALID',
+          `task ${task.nodeId} environment ${key} must be a SHA-256 identity`,
+        );
       }
       selectedEnvironment[key] = environment[key];
     }
