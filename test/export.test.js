@@ -38,7 +38,12 @@ function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
 
-function fixture({ allowlistedEnv = [], environmentValue = {}, portable = false } = {}) {
+function fixture({
+  allowlistedEnv = [],
+  environmentValue = {},
+  portable = false,
+  artifactContent = '{"proof":true}\n',
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'devai-export-test-'));
   temporaryDirectories.push(root);
   const repo = join(root, 'candidate');
@@ -70,7 +75,7 @@ function fixture({ allowlistedEnv = [], environmentValue = {}, portable = false 
     profiles: [{ profileId: 'rc', mode: 'fixed', requiredNodes: ['test:one'] }],
   };
   put(join(repo, 'input.txt'), 'input\n');
-  if (portable) put(join(repo, 'generated.json'), '{"proof":true}\n');
+  if (portable) put(join(repo, 'generated.json'), artifactContent);
   put(join(repo, 'test-tasks.json'), `${JSON.stringify(descriptor, null, 2)}\n`);
   git(repo, ['add', '-A']);
   git(repo, ['commit', '--quiet', '-m', 'candidate']);
@@ -247,6 +252,20 @@ describe('trusted candidate evidence export', () => {
         expectedPolicyDigest: state.built.taskPolicyDigest,
       }),
     );
+  });
+
+  it('atomically refuses credential-shaped material and workstation paths', () => {
+    for (const [code, value] of [
+      ['ARTIFACT_CREDENTIAL_MATERIAL', `gho_${'a'.repeat(36)}`],
+      ['ARTIFACT_HOST_PATH', '/Users/inspector/stynx/report.json'],
+    ]) {
+      const state = fixture({
+        portable: true,
+        artifactContent: `${JSON.stringify({ value })}\n`,
+      });
+      expectCode(code, () => exportCandidateEvidence(exportOptions(state)));
+      assert.equal(existsSync(state.outputDir), false);
+    }
   });
 
   it('refuses dirty candidates before signing', () => {

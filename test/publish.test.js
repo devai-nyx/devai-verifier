@@ -49,7 +49,12 @@ function fixture() {
     schemaVersion: '1.1.0',
     repositoryId: 'fixture/repository',
     requiredNodes: [
-      { nodeId: 'test:rc', taskKey, dependencies: [], outputContract: { kind: 'none' } },
+      {
+        nodeId: 'test:rc',
+        taskKey,
+        dependencies: [],
+        outputContract: { kind: 'files', paths: ['generated.json'], requiredResult: 'pass' },
+      },
     ],
   };
   const policyDigest = sha256Hex(policy);
@@ -63,6 +68,7 @@ function fixture() {
     outputDigests: {
       stdout: sha256Hex(Buffer.from('')),
       stderr: sha256Hex(Buffer.from('')),
+      'generated.json': sha256Hex(Buffer.from('{"proof":true}\n')),
     },
     startedAt: '2026-08-16T00:00:00.000Z',
     finishedAt: '2026-08-16T00:00:01.000Z',
@@ -102,6 +108,7 @@ function fixture() {
   put(join(bundle, 'envelope.json'), envelope);
   put(join(bundle, 'task-policy.json'), policy);
   put(join(bundle, 'results', `${resultDigest}.json`), result);
+  put(join(bundle, 'artifacts', 'generated.json'), '{"proof":true}\n');
   put(join(bundle, 'manifest.json'), {
     schemaVersion: '1.1.0',
     repositoryId: 'fixture/repository',
@@ -112,7 +119,13 @@ function fixture() {
     taskPolicyDigest: policyDigest,
     envelopeDigest: sha256Hex(envelope),
     resultDigests: [resultDigest],
-    artifacts: [],
+    artifacts: [
+      {
+        path: 'generated.json',
+        mediaType: 'application/json',
+        sha256: sha256Hex(Buffer.from('{"proof":true}\n')),
+      },
+    ],
   });
   const trustStorePath = join(root, 'trust.json');
   put(trustStorePath, trust);
@@ -199,5 +212,19 @@ describe('protected evidence publication', () => {
     manifest.envelopeDigest = sha256Hex(envelope);
     put(join(state.bundle, 'manifest.json'), manifest);
     expectCode('TAG_COLLISION', () => publishCandidateEvidence(options(state, [])));
+  });
+
+  it('rechecks artifact content safety before publication', () => {
+    const state = fixture();
+    const artifactPath = join(state.bundle, 'artifacts', 'generated.json');
+    const manifestPath = join(state.bundle, 'manifest.json');
+    const value = `${JSON.stringify({ token: `gho_${'a'.repeat(36)}` })}\n`;
+    put(artifactPath, value);
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    manifest.artifacts[0].sha256 = sha256Hex(Buffer.from(value));
+    put(manifestPath, manifest);
+    expectCode('ARTIFACT_CREDENTIAL_MATERIAL', () =>
+      verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
+    );
   });
 });

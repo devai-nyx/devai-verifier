@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
+import { artifactMediaType } from './artifact-safety.js';
 import { VerificationError, canonicalBytes, canonicalize, readJson, sha256Hex } from './canonical.js';
 import {
   buildExpectedTaskPolicy,
@@ -127,10 +128,6 @@ function declaredArtifactPaths(taskPolicy) {
     for (const path of node.outputContract.paths ?? []) paths.add(path);
   }
   return [...paths].sort();
-}
-
-function artifactMediaType(path) {
-  return path.endsWith('.json') ? 'application/json' : 'application/octet-stream';
 }
 
 export function exportCandidateEvidence({

@@ -1,6 +1,7 @@
 import { createPublicKey, verify as verifySignature } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { artifactMediaType, validateArtifactContent } from './artifact-safety.js';
 import {
   VerificationError,
   assertExactKeys,
@@ -266,7 +267,9 @@ function verifyArtifacts(policy, results, artifactsDir) {
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new VerificationError('ARTIFACT_INVALID', `artifact ${path} is not a regular file`);
       }
-      const actualDigest = sha256Hex(readFileSync(absolute));
+      const bytes = readFileSync(absolute);
+      validateArtifactContent({ bytes, path, mediaType: artifactMediaType(path) });
+      const actualDigest = sha256Hex(bytes);
       if (result.outputDigests[path] !== actualDigest) {
         throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `artifact ${path} digest does not match`);
       }
