@@ -13,13 +13,21 @@ The verifier accepts a canonical, Ed25519-signed candidate receipt and checks:
 - exact required-node population and task keys;
 - task-result content digests and dependency-result bindings; and
 - PASS-only reusable task results; and
-- schema 1.1 declared-output population and byte digests.
+- schema 1.1 declared-output population and byte digests; and
+- bounded content-safety inspection of declared text and JSON artifacts.
 
 The `mutation-report-set-v1` output contract is semantic, not opaque. The
 verifier independently checks the exact package and artifact roster, canonical
 JSON, normalized paths, Stryker status totals and score calculation, package
 thresholds, report/result digests, aggregate totals, and the complete/pass
 verdict. Absolute workstation paths and incomplete report sets are rejected.
+Declared UTF-8 text and JSON artifacts are also rejected when they contain
+high-confidence credential material, private-key blocks, credential-bearing
+URLs, or workstation-specific absolute paths. Rejections use stable
+`ARTIFACT_CREDENTIAL_MATERIAL` and `ARTIFACT_HOST_PATH` codes and never include
+the matching content. Opaque binary artifacts remain digest-bound but are not
+interpreted as text; this boundary is defense in depth, not a guarantee that
+pattern matching can identify every possible secret.
 
 ## Trust boundary
 
@@ -106,6 +114,9 @@ The output directory is created atomically. Legacy schema 1.0 bundles contain
 exact digest-named results. Schema 1.1 bundles contain no trust store: remote
 verification must supply default-branch or protected-environment trust. They
 also contain only declared output files under `artifacts/`.
+Content safety is checked through the same verifier path before the atomic
+output rename, during explicit bundle re-verification, and again before
+publication or remote acceptance.
 
 Export is network-free. Publication is an explicit second command that
 re-verifies the prepared bundle with an external trust store, creates an orphan
