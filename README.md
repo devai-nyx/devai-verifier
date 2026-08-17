@@ -1,17 +1,25 @@
 # DEVAI evidence verifier reference
 
 This standalone repository is the candidate-independent reference verifier for a
-DEVAI v1.0 RC evidence receipt. It uses Node.js built-ins only and contains no
+DEVAI RC evidence receipt. It uses Node.js built-ins only and contains no
 production private key.
 
 The verifier accepts a canonical, Ed25519-signed candidate receipt and checks:
 
 - trusted and non-revoked signer identity;
-- exact repository, commit, and Git tree binding;
+- exact repository and Git tree binding, with exact-commit PR mode and explicit
+  tree-equivalent merged-main mode;
 - an independently supplied task-policy digest;
 - exact required-node population and task keys;
 - task-result content digests and dependency-result bindings; and
-- PASS-only reusable task results.
+- PASS-only reusable task results; and
+- schema 1.1 declared-output population and byte digests.
+
+The `mutation-report-set-v1` output contract is semantic, not opaque. The
+verifier independently checks the exact package and artifact roster, canonical
+JSON, normalized paths, Stryker status totals and score calculation, package
+thresholds, report/result digests, aggregate totals, and the complete/pass
+verdict. Absolute workstation paths and incomplete report sets are rejected.
 
 ## Trust boundary
 
@@ -48,7 +56,8 @@ node src/cli.js \
   --repository devaii \
   --commit <40-or-64-hex> \
   --tree <40-or-64-hex> \
-  --policy-digest <64-hex>
+  --policy-digest <64-hex> \
+  --binding exact-commit
 ```
 
 Exit contract:
@@ -92,9 +101,29 @@ node src/export-cli.js \
 ```
 
 Affected-mode export additionally requires `--base <exact-ancestor-commit>`.
-The output directory is created atomically and contains `envelope.json`,
-`task-policy.json`, `trust-store.json`, `manifest.json`, and only the exact
-digest-named result files referenced by the receipt.
+The output directory is created atomically. Legacy schema 1.0 bundles contain
+`envelope.json`, `task-policy.json`, `trust-store.json`, `manifest.json`, and the
+exact digest-named results. Schema 1.1 bundles contain no trust store: remote
+verification must supply default-branch or protected-environment trust. They
+also contain only declared output files under `artifacts/`.
+
+Export is network-free. Publication is an explicit second command that
+re-verifies the prepared bundle with an external trust store, creates an orphan
+proof commit, creates or confirms the immutable annotated evidence tag, pushes
+only that tag, and dispatches the default-branch verifier workflow:
+
+```text
+node src/publish-cli.js \
+  --repo /exact/candidate \
+  --bundle /protected/evidence/<exact-commit> \
+  --trust /protected/control/trust-store.json \
+  --tag-prefix devai-local-evidence/ \
+  --workflow devai-local-rc-verify.yml \
+  --default-branch main
+```
+
+An existing tag is accepted only when its proof-tree bytes are identical.
+Different bytes fail with `TAG_COLLISION`; tags are never updated or deleted.
 
 To prepare the existing GitHub workflow inputs from a protected shell, encode
 the three JSON files directly and create the result archive with a stable name:

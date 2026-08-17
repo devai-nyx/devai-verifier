@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devai.nyx/schemas/candidate-receipt-1.1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repository",
+    "profile",
+    "taskPolicyDigest",
+    "createdAt",
+    "tasks"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.1.0" },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "commit", "tree"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+        "tree": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+      }
+    },
+    "profile": { "enum": ["affected", "rc"] },
+    "taskPolicyDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "taskKey", "resultDigest"],
+        "properties": {
+          "nodeId": { "type": "string", "minLength": 1 },
+          "taskKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "resultDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

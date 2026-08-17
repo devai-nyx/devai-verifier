@@ -197,6 +197,43 @@ describe('candidate-independent evidence verification', () => {
     }
   });
 
+  it('accepts a different commit only in explicit exact-tree mode', () => {
+    const state = fixture();
+    const mergedCommit = 'c'.repeat(40);
+    expectCode('COMMIT_MISMATCH', () => verify(state, { expectedCommit: mergedCommit }));
+    const verified = verify(state, {
+      expectedCommit: mergedCommit,
+      bindingMode: 'exact-tree',
+    });
+    assert.equal(verified.binding, 'exact-tree');
+    assert.equal(verified.commit, mergedCommit);
+    assert.equal(verified.evidenceCommit, COMMIT);
+
+    expectCode('TREE_MISMATCH', () =>
+      verify(state, {
+        expectedCommit: mergedCommit,
+        expectedTree: 'd'.repeat(40),
+        bindingMode: 'exact-tree',
+      }),
+    );
+  });
+
+  it('accepts schema 1.1 policies with immutable output contracts', () => {
+    const state = fixture();
+    state.taskPolicy.schemaVersion = '1.1.0';
+    for (const node of state.taskPolicy.requiredNodes) {
+      node.outputContract = { kind: 'none' };
+    }
+    state.policyDigest = sha256Hex(state.taskPolicy);
+    state.receipt.schemaVersion = '1.1.0';
+    state.receipt.taskPolicyDigest = state.policyDigest;
+    state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
+    assert.equal(verify(state).ok, true);
+
+    delete state.taskPolicy.requiredNodes[0].outputContract;
+    expectCode('SCHEMA_INVALID', () => verify(state));
+  });
+
   it('rejects revoked and untrusted signers', () => {
     const revoked = fixture();
     revoked.trustStore.revokedSignerIds.push('owner-workstation');

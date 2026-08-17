@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devai.nyx/schemas/evidence-manifest-1.1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repositoryId",
+    "commit",
+    "tree",
+    "profile",
+    "signerId",
+    "taskPolicyDigest",
+    "envelopeDigest",
+    "resultDigests",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.1.0" },
+    "repositoryId": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "tree": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "profile": { "const": "rc" },
+    "signerId": { "type": "string", "minLength": 1 },
+    "taskPolicyDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "envelopeDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "resultDigests": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "mediaType", "sha256"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "mediaType": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

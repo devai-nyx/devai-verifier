@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devai.nyx/schemas/task-policy-1.1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "repositoryId", "requiredNodes"],
+  "properties": {
+    "schemaVersion": { "const": "1.1.0" },
+    "repositoryId": { "type": "string", "minLength": 1 },
+    "requiredNodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "taskKey", "dependencies", "outputContract"],
+        "properties": {
+          "nodeId": { "type": "string", "minLength": 1 },
+          "taskKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "dependencies": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "outputContract": { "type": "object" }
+        }
+      }
+    }
+  }
+}

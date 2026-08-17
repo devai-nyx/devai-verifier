@@ -9,7 +9,9 @@
   "bin": {
     "devai-evidence-verify": "./src/cli.js",
     "devai-evidence-policy": "./src/build-policy-cli.js",
-    "devai-evidence-export": "./src/export-cli.js"
+    "devai-evidence-export": "./src/export-cli.js",
+    "devai-evidence-publish": "./src/publish-cli.js",
+    "devai-evidence-bundle-verify": "./src/bundle-cli.js"
   },
   "scripts": {
     "test": "node --test"

@@ -18,6 +18,9 @@ import { buildExpectedTaskPolicy, selectorMatches } from '../src/policy-builder.
 const CLI = resolve(import.meta.dirname, '../src/build-policy-cli.js');
 const TOOLCHAIN = { node: '24.5.0', git: '2.50.1' };
 const ENVIRONMENT = { CI: 'false', IGNORED_SECRET: 'not-bound' };
+const PORTABLE_ENVIRONMENT = Object.fromEntries(
+  Object.entries(ENVIRONMENT).map(([key, value]) => [key, `sha256:${sha256Hex(value)}`]),
+);
 const temporaryDirectories = [];
 
 afterEach(() => {
@@ -141,7 +144,15 @@ function descriptor({ fallbackNodeId = 'full', dynamic = true } = {}) {
   };
 }
 
-function build({ repo, candidate, base, policy = descriptor(), profileId = 'affected', ...rest }) {
+function build({
+  repo,
+  candidate,
+  base,
+  policy = descriptor(),
+  profileId = 'affected',
+  environment,
+  ...rest
+}) {
   return buildExpectedTaskPolicy({
     repo,
     descriptor: policy,
@@ -150,7 +161,8 @@ function build({ repo, candidate, base, policy = descriptor(), profileId = 'affe
     expectedTree: candidate.tree,
     baseCommit: base?.commit,
     toolchain: TOOLCHAIN,
-    environment: ENVIRONMENT,
+    environment:
+      environment ?? (rest.policySchemaVersion === '1.1.0' ? PORTABLE_ENVIRONMENT : ENVIRONMENT),
     ...rest,
   });
 }
@@ -177,6 +189,32 @@ describe('selector semantics', () => {
     for (const [selector, path, expected] of cases) {
       assert.equal(selectorMatches(selector, path), expected, `${selector.kind}:${path}`);
     }
+  });
+});
+
+describe('task-policy schema compatibility', () => {
+  it('emits output contracts only in schema 1.1 policies', () => {
+    const state = repository();
+    const legacy = build({
+      repo: state.repo,
+      base: state.base,
+      candidate: state.base,
+      profileId: 'rc',
+    });
+    const portable = build({
+      repo: state.repo,
+      base: state.base,
+      candidate: state.base,
+      profileId: 'rc',
+      policySchemaVersion: '1.1.0',
+    });
+    assert.equal(legacy.taskPolicy.schemaVersion, '1.0.0');
+    assert.equal(Object.hasOwn(legacy.taskPolicy.requiredNodes[0], 'outputContract'), false);
+    assert.equal(portable.taskPolicy.schemaVersion, '1.1.0');
+    assert.deepEqual(portable.taskPolicy.requiredNodes[0].outputContract, {
+      kind: 'files',
+      paths: ['generated.json'],
+    });
   });
 });
 
@@ -449,6 +487,132 @@ describe('fail-closed descriptor and Git boundaries', () => {
         candidate: state.base,
         profileId: 'rc',
         environment: { CI: false },
+      }),
+    );
+    expectCode('ENVIRONMENT_IDENTITY_INVALID', () =>
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policySchemaVersion: '1.1.0',
+        environment: ENVIRONMENT,
+      }),
+    );
+  });
+});
+
+describe('mutation output discovery', () => {
+  function mutationDescriptor() {
+    return {
+      schemaVersion: '1.0.0',
+      descriptorVersion: 'mutation-discovery-1',
+      repositoryId: 'fixture-repository',
+      fallbackNodeId: null,
+      dynamicFallbackSelectors: [],
+      tasks: [
+        task({
+          nodeId: 'test:mutation',
+          inputSelectors: [
+            { kind: 'glob', pattern: 'packages/*/package.json' },
+            { kind: 'glob', pattern: 'packages/*/stryker.*' },
+            { kind: 'exact', pattern: 'tools/repo-config/test-policy.json' },
+          ],
+          outputContract: {
+            kind: 'mutation-report-set-discovery-v1',
+            workspaceRoots: ['packages'],
+            testPolicyPath: 'tools/repo-config/test-policy.json',
+            artifactRoot: '.devai/local/evidence/mutation',
+            summaryPath: '.devai/local/evidence/mutation/summary.json',
+          },
+        }),
+      ],
+      profiles: [{ profileId: 'rc', mode: 'fixed', requiredNodes: ['test:mutation'] }],
+    };
+  }
+
+  it('derives the exact package roster and thresholds from committed candidate inputs', () => {
+    const state = repository();
+    put(
+      state.repo,
+      'tools/repo-config/test-policy.json',
+      JSON.stringify({
+        policies: { mutation: { tier3: { break: 90, high: 100, low: 90 } } },
+        defaults: { mutation: 'tier3' },
+        perPackage: {},
+      }),
+    );
+    put(
+      state.repo,
+      'packages/core/package.json',
+      JSON.stringify({ name: '@stynx/core', scripts: { stryker: 'stryker run' } }),
+    );
+    put(state.repo, 'packages/core/stryker.conf.mjs', 'export default { threshold: 70 }\n');
+    put(
+      state.repo,
+      'packages/plain/package.json',
+      JSON.stringify({ name: '@stynx/plain', scripts: { test: 'node --test' } }),
+    );
+    const first = commit(state.repo, 'one mutation package');
+    const firstPolicy = build({
+      repo: state.repo,
+      candidate: first,
+      profileId: 'rc',
+      policy: mutationDescriptor(),
+      policySchemaVersion: '1.1.0',
+    });
+    const firstNode = firstPolicy.taskPolicy.requiredNodes[0];
+    assert.equal(firstNode.outputContract.expectedPackageCount, 1);
+    assert.deepEqual(firstNode.outputContract.packages, [
+      {
+        packageName: '@stynx/core',
+        workspace: 'packages/core',
+        resultPath: '.devai/local/evidence/mutation/packages-core.result.json',
+        reportPath: '.devai/local/evidence/mutation/packages-core.stryker.json',
+        thresholds: { break: 70, high: 70, low: 60 },
+      },
+    ]);
+
+    put(
+      state.repo,
+      'packages/extra/package.json',
+      JSON.stringify({ name: '@stynx/extra', scripts: { stryker: 'stryker run' } }),
+    );
+    put(state.repo, 'packages/extra/stryker.config.mjs', 'export default {}\n');
+    const second = commit(state.repo, 'two mutation packages');
+    const secondPolicy = build({
+      repo: state.repo,
+      candidate: second,
+      profileId: 'rc',
+      policy: mutationDescriptor(),
+      policySchemaVersion: '1.1.0',
+    });
+    assert.equal(secondPolicy.taskPolicy.requiredNodes[0].outputContract.expectedPackageCount, 2);
+    assert.notEqual(firstNode.taskKey, secondPolicy.taskPolicy.requiredNodes[0].taskKey);
+  });
+
+  it('fails closed when a Stryker command and configuration are not paired', () => {
+    const state = repository();
+    put(
+      state.repo,
+      'tools/repo-config/test-policy.json',
+      JSON.stringify({
+        policies: { mutation: { default: 90 } },
+        defaults: { mutation: 'default' },
+      }),
+    );
+    put(
+      state.repo,
+      'packages/broken/package.json',
+      JSON.stringify({ name: '@stynx/broken', scripts: { stryker: 'stryker run' } }),
+    );
+    const candidate = commit(state.repo, 'broken mutation package');
+    expectCode('MUTATION_ROSTER_MISMATCH', () =>
+      build({
+        repo: state.repo,
+        candidate,
+        profileId: 'rc',
+        policy: mutationDescriptor(),
+        policySchemaVersion: '1.1.0',
       }),
     );
   });

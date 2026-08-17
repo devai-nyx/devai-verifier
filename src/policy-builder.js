@@ -9,10 +9,12 @@ import {
   canonicalBytes,
   sha256Hex,
 } from './canonical.js';
+import { resolveMutationDiscoveryContract } from './mutation.js';
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const ENVIRONMENT_KEY = /^[A-Z_][A-Z0-9_]*$/u;
+const ENVIRONMENT_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
 
 function git(repo, args, { encoding = 'utf8', input } = {}) {
   const result = spawnSync('git', ['-C', repo, ...args], {
@@ -415,7 +417,11 @@ export function buildExpectedTaskPolicy({
   baseCommit,
   toolchain,
   environment,
+  policySchemaVersion = '1.0.0',
 }) {
+  if (policySchemaVersion !== '1.0.0' && policySchemaVersion !== '1.1.0') {
+    throw new VerificationError('SCHEMA_INVALID', 'unsupported task-policy schemaVersion');
+  }
   validateDescriptor(descriptor);
   validateStringMap(toolchain, 'toolchain');
   validateEnvironmentMap(environment, 'environment');
@@ -449,6 +455,12 @@ export function buildExpectedTaskPolicy({
     repo,
     entries.map((entry) => entry.objectId),
   );
+  const outputContracts = new Map(
+    ordered.map((task) => [
+      task.nodeId,
+      resolveMutationDiscoveryContract(repo, candidateCommit, task.outputContract),
+    ]),
+  );
   const taskKeys = new Map();
   for (const task of ordered) {
     if (!selected.has(task.nodeId)) continue;
@@ -463,6 +475,16 @@ export function buildExpectedTaskPolicy({
     for (const key of [...task.allowlistedEnv].sort()) {
       if (!Object.hasOwn(environment, key)) {
         throw new VerificationError('ENVIRONMENT_MISSING', `task ${task.nodeId} requires environment ${key}`);
+      }
+      if (
+        policySchemaVersion === '1.1.0' &&
+        environment[key] !== null &&
+        !ENVIRONMENT_IDENTITY.test(environment[key])
+      ) {
+        throw new VerificationError(
+          'ENVIRONMENT_IDENTITY_INVALID',
+          `task ${task.nodeId} environment ${key} must be a SHA-256 identity`,
+        );
       }
       selectedEnvironment[key] = environment[key];
     }
@@ -489,7 +511,7 @@ export function buildExpectedTaskPolicy({
         runner: task.runner,
         toolchain: selectedToolchain,
         environment: selectedEnvironment,
-        outputContract: task.outputContract,
+        outputContract: outputContracts.get(task.nodeId),
         inputs,
         dependencies,
       }),
@@ -497,13 +519,17 @@ export function buildExpectedTaskPolicy({
   }
   const requiredNodes = ordered
     .filter((task) => selected.has(task.nodeId))
-    .map((task) => ({
-      nodeId: task.nodeId,
-      taskKey: taskKeys.get(task.nodeId),
-      dependencies: [...task.dependencies],
-    }));
+    .map((task) => {
+      const node = {
+        nodeId: task.nodeId,
+        taskKey: taskKeys.get(task.nodeId),
+        dependencies: [...task.dependencies],
+      };
+      if (policySchemaVersion === '1.1.0') node.outputContract = outputContracts.get(task.nodeId);
+      return node;
+    });
   const taskPolicy = {
-    schemaVersion: '1.0.0',
+    schemaVersion: policySchemaVersion,
     repositoryId: descriptor.repositoryId,
     requiredNodes,
   };
