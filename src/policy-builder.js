@@ -16,6 +16,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const ENVIRONMENT_KEY = /^[A-Z_][A-Z0-9_]*$/u;
 const ENVIRONMENT_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
 const EXECUTABLE_DIGEST = /^[0-9a-f]{64}$/u;
+const BARE_EXECUTABLE = /^[A-Za-z0-9._-]+$/u;
 
 function git(repo, args, { encoding = 'utf8', input } = {}) {
   const result = spawnSync('git', ['-C', repo, ...args], {
@@ -223,6 +224,12 @@ function validateDescriptor(descriptor) {
       if (argument.includes('\0')) {
         throw new VerificationError('SCHEMA_INVALID', `${label}.argv contains NUL`);
       }
+    }
+    if (!BARE_EXECUTABLE.test(task.argv[0])) {
+      throw new VerificationError(
+        'SCHEMA_INVALID',
+        `${label}.argv[0] must be a bare executable name`,
+      );
     }
     if (task.cwd !== '.') normalizePath(task.cwd, `${label}.cwd`);
     assertString(task.runner, `${label}.runner`, IDENTIFIER);
