@@ -410,6 +410,48 @@ describe('reusable task identity', () => {
     assert.notEqual(absentEnvironment.get('unit'), emptyEnvironment.get('unit'));
     assert.notEqual(absentEnvironment.get('unit'), baseline.get('unit'));
   });
+
+  it('binds a protected resolved executable identity when supplied', () => {
+    const state = repository();
+    const candidate = commit(state.repo, 'candidate');
+    const first = build({
+      repo: state.repo,
+      candidate,
+      base: state.base.commit,
+      profileId: 'rc',
+      toolchain: {
+        ...TOOLCHAIN,
+        'executable:node': JSON.stringify({ path: '/opt/node/bin/node', sha256: 'a'.repeat(64) }),
+      },
+    });
+    const changed = build({
+      repo: state.repo,
+      candidate,
+      base: state.base.commit,
+      profileId: 'rc',
+      toolchain: {
+        ...TOOLCHAIN,
+        'executable:node': JSON.stringify({ path: '/opt/node/bin/node', sha256: 'b'.repeat(64) }),
+      },
+    });
+    assert.notEqual(first.taskPolicyDigest, changed.taskPolicyDigest);
+  });
+
+  it('rejects malformed protected executable identities', () => {
+    const state = repository();
+    const candidate = commit(state.repo, 'candidate');
+    assert.throws(
+      () =>
+        build({
+          repo: state.repo,
+          candidate,
+          base: state.base.commit,
+          profileId: 'rc',
+          toolchain: { ...TOOLCHAIN, 'executable:node': '{"path":"/opt/node"}' },
+        }),
+      /executable:node/,
+    );
+  });
 });
 
 describe('fail-closed descriptor and Git boundaries', () => {
