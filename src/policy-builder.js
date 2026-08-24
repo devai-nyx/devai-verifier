@@ -15,6 +15,7 @@ const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const ENVIRONMENT_KEY = /^[A-Z_][A-Z0-9_]*$/u;
 const ENVIRONMENT_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
+const EXECUTABLE_DIGEST = /^[0-9a-f]{64}$/u;
 
 function git(repo, args, { encoding = 'utf8', input } = {}) {
   const result = spawnSync('git', ['-C', repo, ...args], {
@@ -137,6 +138,30 @@ function validateEnvironmentMap(value, label) {
     assertString(key, `${label} key`, IDENTIFIER);
     if (entry !== null) assertString(entry, `${label}.${key}`);
   }
+}
+
+function protectedExecutableIdentity(toolchain, executable) {
+  const encoded = toolchain[`executable:${executable}`];
+  if (encoded === undefined) return undefined;
+  let identity;
+  try {
+    identity = JSON.parse(encoded);
+  } catch {
+    throw new VerificationError(
+      'EXECUTABLE_IDENTITY_INVALID',
+      `executable:${executable} must be canonical JSON`,
+    );
+  }
+  assertExactKeys(identity, ['path', 'sha256'], `executable:${executable}`);
+  assertString(identity.path, `executable:${executable}.path`);
+  assertString(identity.sha256, `executable:${executable}.sha256`, EXECUTABLE_DIGEST);
+  if (JSON.stringify(identity) !== encoded) {
+    throw new VerificationError(
+      'EXECUTABLE_IDENTITY_INVALID',
+      `executable:${executable} must use canonical key order`,
+    );
+  }
+  return identity;
 }
 
 function validateDescriptor(descriptor) {
@@ -499,6 +524,7 @@ export function buildExpectedTaskPolicy({
       nodeId,
       taskKey: taskKeys.get(nodeId),
     }));
+    const executable = protectedExecutableIdentity(toolchain, task.argv[0]);
     taskKeys.set(
       task.nodeId,
       sha256Hex({
@@ -507,6 +533,7 @@ export function buildExpectedTaskPolicy({
         descriptorVersion: descriptor.descriptorVersion,
         nodeId: task.nodeId,
         argv: task.argv,
+        ...(executable === undefined ? {} : { executable }),
         cwd: task.cwd,
         runner: task.runner,
         toolchain: selectedToolchain,
