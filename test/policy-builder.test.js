@@ -482,6 +482,24 @@ describe('fail-closed descriptor and Git boundaries', () => {
     );
   });
 
+  it('rejects path-shaped executable names', () => {
+    const state = repository();
+    const candidate = commit(state.repo, 'candidate');
+    const policy = descriptor();
+    policy.tasks[0].argv[0] = '../bin/node';
+    assert.throws(
+      () =>
+        build({
+          repo: state.repo,
+          candidate,
+          base: state.base,
+          policy,
+          profileId: 'rc',
+        }),
+      /bare executable name/,
+    );
+  });
+
   it('rejects a wrong expected tree', () => {
     const state = repository();
     expectCode('TREE_MISMATCH', () =>
