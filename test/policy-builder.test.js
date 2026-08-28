@@ -219,6 +219,100 @@ describe('task-policy schema compatibility', () => {
 });
 
 describe('candidate snapshot and affected derivation', () => {
+  it('excludes only harness-mutated prefixes from reusable fixed-profile identity', () => {
+    const state = repository();
+    for (const [path, content] of [
+      ['.devai/state/example.json', '{"value":1}\n'],
+      ['record/proofs/example.json', '{"value":1}\n'],
+      ['scratch/example.txt', 'value 1\n'],
+      ['.devai/stateful/example.json', '{"value":1}\n'],
+      ['recording/example.json', '{"value":1}\n'],
+      ['scratchpad/example.txt', 'value 1\n'],
+    ]) {
+      put(state.repo, path, content);
+    }
+    const baselineCommit = commit(state.repo, 'add harness and similarly named paths');
+    const baseline = build({
+      repo: state.repo,
+      candidate: baselineCommit,
+      profileId: 'rc',
+    });
+
+    put(state.repo, '.devai/state/example.json', '{"value":2}\n');
+    put(state.repo, 'record/proofs/example.json', '{"value":2}\n');
+    put(state.repo, 'scratch/example.txt', 'value 2\n');
+    const harnessOnlyCommit = commit(state.repo, 'change harness-mutated paths');
+    const harnessOnly = build({
+      repo: state.repo,
+      candidate: harnessOnlyCommit,
+      profileId: 'rc',
+    });
+    assert.deepEqual(harnessOnly.taskPolicy, baseline.taskPolicy);
+    assert.equal(harnessOnly.taskPolicyDigest, baseline.taskPolicyDigest);
+
+    for (const [path, content] of [
+      ['.devai/stateful/example.json', '{"value":2}\n'],
+      ['recording/example.json', '{"value":2}\n'],
+      ['scratchpad/example.txt', 'value 2\n'],
+    ]) {
+      put(state.repo, path, content);
+    }
+    const similarlyNamedCommit = commit(state.repo, 'change similarly named paths');
+    const similarlyNamed = build({
+      repo: state.repo,
+      candidate: similarlyNamedCommit,
+      profileId: 'rc',
+    });
+    assert.notEqual(similarlyNamed.taskPolicyDigest, harnessOnly.taskPolicyDigest);
+
+    put(state.repo, 'src/a.js', 'export const value = 2;\n');
+    const sourceCommit = commit(state.repo, 'change source');
+    const source = build({ repo: state.repo, candidate: sourceCommit, profileId: 'rc' });
+    assert.notEqual(source.taskPolicyDigest, similarlyNamed.taskPolicyDigest);
+    assert.notEqual(keyMap(source).get('unit'), keyMap(similarlyNamed).get('unit'));
+    assert.deepEqual(
+      build({ repo: state.repo, candidate: sourceCommit, profileId: 'rc' }),
+      source,
+    );
+  });
+
+  it('ignores harness-only affected changes without selecting the glob fallback', () => {
+    const state = repository();
+    put(state.repo, '.devai/state/example.json', '{"value":1}\n');
+    put(state.repo, 'record/proofs/example.json', '{"value":1}\n');
+    put(state.repo, 'scratch/example.txt', 'value 1\n');
+    put(state.repo, '.devai/stateful/example.json', '{"value":1}\n');
+    put(state.repo, 'recording/example.json', '{"value":1}\n');
+    put(state.repo, 'scratchpad/example.txt', 'value 1\n');
+    const baseline = commit(state.repo, 'add harness path fixtures');
+
+    put(state.repo, '.devai/state/example.json', '{"value":2}\n');
+    put(state.repo, 'record/proofs/example.json', '{"value":2}\n');
+    put(state.repo, 'scratch/example.txt', 'value 2\n');
+    const harnessOnly = commit(state.repo, 'change harness-only paths');
+    const ignored = build({ repo: state.repo, base: baseline, candidate: harnessOnly });
+    assert.deepEqual(ignored.changedPaths, []);
+    assert.deepEqual(
+      ignored.taskPolicy.requiredNodes.map((node) => node.nodeId),
+      ['prepare'],
+    );
+
+    put(state.repo, '.devai/stateful/example.json', '{"value":2}\n');
+    put(state.repo, 'recording/example.json', '{"value":2}\n');
+    put(state.repo, 'scratchpad/example.txt', 'value 2\n');
+    const similarlyNamed = commit(state.repo, 'change similarly named paths');
+    const selected = build({ repo: state.repo, base: harnessOnly, candidate: similarlyNamed });
+    assert.deepEqual(selected.changedPaths, [
+      '.devai/stateful/example.json',
+      'recording/example.json',
+      'scratchpad/example.txt',
+    ]);
+    assert.deepEqual(
+      selected.taskPolicy.requiredNodes.map((node) => node.nodeId),
+      ['prepare', 'unit', 'contract', 'full'],
+    );
+  });
+
   it('selects source, helper, config, lockfile, and test changes with dependency closure', () => {
     const mutations = [
       ['src/a.js', 'export const value = 2;\n', ['prepare', 'unit', 'contract']],

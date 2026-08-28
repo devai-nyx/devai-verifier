@@ -17,6 +17,11 @@ const ENVIRONMENT_KEY = /^[A-Z_][A-Z0-9_]*$/u;
 const ENVIRONMENT_IDENTITY = /^sha256:[0-9a-f]{64}$/u;
 const EXECUTABLE_DIGEST = /^[0-9a-f]{64}$/u;
 const BARE_EXECUTABLE = /^[A-Za-z0-9._-]+$/u;
+const HARNESS_MUTATED_PREFIXES = ['.devai/state/', 'record/', 'scratch/'];
+
+function isHarnessMutatedPath(path) {
+  return HARNESS_MUTATED_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
 
 function git(repo, args, { encoding = 'utf8', input } = {}) {
   const result = spawnSync('git', ['-C', repo, ...args], {
@@ -478,10 +483,14 @@ export function buildExpectedTaskPolicy({
     if (ancestor.status !== 0) {
       throw new VerificationError('BASE_NOT_ANCESTOR', 'base commit is not an ancestor of candidate');
     }
-    changes = changedPaths(repo, baseCommit, candidateCommit);
+    changes = changedPaths(repo, baseCommit, candidateCommit).filter(
+      (path) => !isHarnessMutatedPath(path),
+    );
   }
   const selected = selectedNodeIds(descriptor, profile, changes);
-  const entries = snapshot(repo, candidateCommit);
+  const entries = snapshot(repo, candidateCommit).filter(
+    (entry) => !isHarnessMutatedPath(entry.path),
+  );
   const descriptorDigest = sha256Hex(descriptor);
   const blobDigests = objectContentDigests(
     repo,
