@@ -14,6 +14,7 @@ import {
 const PACKAGE_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/u;
 const PORTABLE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)(?!.*\0)[^/]+(?:\/[^/]+)*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
+const GIT_OBJECT = /^(?!0+$)(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const MUTANT_STATUSES = [
   'CompileError',
   'Ignored',
@@ -195,6 +196,19 @@ function validateStatusTotals(value, label) {
   for (const status of MUTANT_STATUSES) assertNonnegativeInteger(value[status], `${label}.${status}`);
 }
 
+function validateSuccessfulProcess(value, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new VerificationError('MUTATION_REPORT_INVALID', `${label} must be an object`);
+  }
+  assertExactKeys(value, ['errorAbsent', 'signal', 'status'], label);
+  if (value.errorAbsent !== true || value.signal !== null || value.status !== 0) {
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label} must record an exact successful process`,
+    );
+  }
+}
+
 function readCanonicalJson(path, label) {
   let text;
   let value;
@@ -244,7 +258,14 @@ function reportMetrics(report, label) {
   const detected = totals.Killed + totals.Timeout;
   const scored = detected + totals.Survived + totals.NoCoverage;
   const score = scored === 0 ? 100 : (detected / scored) * 100;
-  return { totals, score };
+  return {
+    totals,
+    score,
+    targetCensus: {
+      targetFileCount: Object.keys(report.files).length,
+      totalMutants: MUTANT_STATUSES.reduce((total, status) => total + totals[status], 0),
+    },
+  };
 }
 
 function validatePackageContract(entry, label) {
@@ -298,21 +319,24 @@ export function validateMutationContract(contract, label) {
 }
 
 function validatePackageResult(result, contract, report, reportDigest, metrics, label) {
+  assertObject(result, label);
+  const keys = [
+    'durationMs',
+    'kind',
+    'packageName',
+    'passed',
+    'reportDigest',
+    'schemaVersion',
+    'score',
+    'statusTotals',
+    'thresholds',
+    'toolVersions',
+    'workspace',
+  ];
+  if (Object.hasOwn(result, 'process')) keys.push('process');
   assertExactKeys(
     result,
-    [
-      'durationMs',
-      'kind',
-      'packageName',
-      'passed',
-      'reportDigest',
-      'schemaVersion',
-      'score',
-      'statusTotals',
-      'thresholds',
-      'toolVersions',
-      'workspace',
-    ],
+    keys,
     label,
   );
   if (result.schemaVersion !== '1.0.0' || result.kind !== 'mutation-package-result-v1') {
@@ -337,6 +361,9 @@ function validatePackageResult(result, contract, report, reportDigest, metrics, 
     assertString(tool, `${label} tool`);
     assertString(version, `${label}.${tool}`);
   }
+  if (Object.hasOwn(result, 'process')) {
+    validateSuccessfulProcess(result.process, `${label}.process`);
+  }
   if (result.reportDigest !== reportDigest) {
     throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `${label} report digest differs`);
   }
@@ -349,14 +376,180 @@ function validatePackageResult(result, contract, report, reportDigest, metrics, 
   }
 }
 
-export function verifyMutationReportSet(contract, artifactsDir) {
+function mutationSummaryMismatch() {
+  throw new VerificationError(
+    'MUTATION_SUMMARY_MISMATCH',
+    'composed mutation summary does not match its strict schema and evidence',
+  );
+}
+
+function validateComposedSummary(summary, candidateCommit, candidateTree, expectedPackageCount) {
+  try {
+    assertExactKeys(
+      summary,
+      [
+        'aggregate',
+        'baseline',
+        'candidate',
+        'complete',
+        'kind',
+        'packages',
+        'passed',
+        'schemaVersion',
+        'semanticRebindComparison',
+      ],
+      'composed mutation summary',
+    );
+    if (
+      summary.schemaVersion !== '1.0.0' ||
+      summary.kind !== 'mutation-composed-report-set-v1' ||
+      summary.complete !== true ||
+      summary.passed !== true
+    ) {
+      mutationSummaryMismatch();
+    }
+    assertString(candidateCommit, 'composed mutation candidate commit', GIT_OBJECT);
+    assertString(candidateTree, 'composed mutation candidate tree', GIT_OBJECT);
+    assertExactKeys(summary.candidate, ['commit', 'tree'], 'composed mutation candidate');
+    assertString(summary.candidate.commit, 'composed mutation candidate.commit', GIT_OBJECT);
+    assertString(summary.candidate.tree, 'composed mutation candidate.tree', GIT_OBJECT);
+
+    assertExactKeys(
+      summary.baseline,
+      ['commit', 'summaryBytes', 'summarySha256', 'tree'],
+      'composed mutation baseline',
+    );
+    assertString(summary.baseline.commit, 'composed mutation baseline.commit', GIT_OBJECT);
+    assertString(summary.baseline.tree, 'composed mutation baseline.tree', GIT_OBJECT);
+    assertNonnegativeInteger(summary.baseline.summaryBytes, 'composed mutation baseline.summaryBytes');
+    if (summary.baseline.summaryBytes === 0) mutationSummaryMismatch();
+    assertString(summary.baseline.summarySha256, 'composed mutation baseline.summarySha256', SHA256);
+
+    const semantic = summary.semanticRebindComparison;
+    assertExactKeys(
+      semantic,
+      [
+        'allowedScriptTransitions',
+        'canonicalContractBytes',
+        'canonicalContractSha256',
+        'comparison',
+        'kind',
+        'sourceRootManifest',
+        'targetRootManifest',
+      ],
+      'composed mutation semantic comparison',
+    );
+    if (semantic.kind !== 'root-manifest-unchanged-with-historical-input-v1') {
+      mutationSummaryMismatch();
+    }
+    assertUniqueStrings(
+      semantic.allowedScriptTransitions,
+      'composed mutation semantic comparison.allowedScriptTransitions',
+    );
+    if (semantic.allowedScriptTransitions.length !== 0) mutationSummaryMismatch();
+    assertNonnegativeInteger(
+      semantic.canonicalContractBytes,
+      'composed mutation semantic comparison.canonicalContractBytes',
+    );
+    if (semantic.canonicalContractBytes === 0) mutationSummaryMismatch();
+    assertString(
+      semantic.canonicalContractSha256,
+      'composed mutation semantic comparison.canonicalContractSha256',
+      SHA256,
+    );
+    assertExactKeys(
+      semantic.comparison,
+      [
+        'historicalMutationInputTreeEntries',
+        'otherMutationInputTreeEntries',
+        'rootManifest',
+      ],
+      'composed mutation semantic comparison.comparison',
+    );
+    if (
+      semantic.comparison.historicalMutationInputTreeEntries !==
+        'match-explicit-historical-candidate-mode-type-oid' ||
+      semantic.comparison.otherMutationInputTreeEntries !== 'identical-mode-type-oid' ||
+      semantic.comparison.rootManifest !== 'source-and-target-identical'
+    ) {
+      mutationSummaryMismatch();
+    }
+    for (const [name, manifest] of [
+      ['sourceRootManifest', semantic.sourceRootManifest],
+      ['targetRootManifest', semantic.targetRootManifest],
+    ]) {
+      const label = `composed mutation semantic comparison.${name}`;
+      assertExactKeys(manifest, ['bytes', 'gitBlobOid', 'sha256'], label);
+      assertNonnegativeInteger(manifest.bytes, `${label}.bytes`);
+      if (manifest.bytes === 0) mutationSummaryMismatch();
+      assertString(manifest.gitBlobOid, `${label}.gitBlobOid`, GIT_OBJECT);
+      assertString(manifest.sha256, `${label}.sha256`, SHA256);
+    }
+    if (canonicalize(semantic.sourceRootManifest) !== canonicalize(semantic.targetRootManifest)) {
+      mutationSummaryMismatch();
+    }
+
+    if (!Array.isArray(summary.packages) || summary.packages.length !== expectedPackageCount) {
+      mutationSummaryMismatch();
+    }
+    assertExactKeys(
+      summary.aggregate,
+      [
+        'durationMs',
+        'freshDurationMs',
+        'freshPackageCount',
+        'packageCount',
+        'reusedPackageCount',
+        'score',
+        'statusTotals',
+      ],
+      'composed mutation aggregate',
+    );
+  } catch (error) {
+    if (error instanceof VerificationError && error.code === 'MUTATION_SUMMARY_MISMATCH') {
+      throw error;
+    }
+    mutationSummaryMismatch();
+  }
+  return {
+    baseline: summary.baseline,
+    semanticRebindComparison: summary.semanticRebindComparison,
+  };
+}
+
+function composedInputProjectionDigest(entry, index) {
+  try {
+    assertObject(entry, `composed mutation packages[${index}]`);
+    assertString(
+      entry.inputProjectionDigest,
+      `composed mutation packages[${index}].inputProjectionDigest`,
+      SHA256,
+    );
+    return entry.inputProjectionDigest;
+  } catch {
+    mutationSummaryMismatch();
+  }
+}
+
+export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   validateMutationContract(contract, 'mutation output contract');
   const summaryFile = readCanonicalJson(join(artifactsDir, contract.summaryPath), 'mutation summary');
   const summary = summaryFile.value;
+  const composed = summary?.kind === 'mutation-composed-report-set-v1';
+  const composedMetadata = composed
+    ? validateComposedSummary(
+        summary,
+        options.candidateCommit,
+        options.candidateTree,
+        contract.expectedPackageCount,
+      )
+    : undefined;
   const aggregateTotals = Object.fromEntries(MUTANT_STATUSES.map((status) => [status, 0]));
   const summaryEntries = [];
   let durationMs = 0;
-  for (const packageContract of contract.packages) {
+  let freshDurationMs = 0;
+  let freshPackageCount = 0;
+  for (const [index, packageContract] of contract.packages.entries()) {
     const reportFile = readCanonicalJson(
       join(artifactsDir, packageContract.reportPath),
       `mutation report ${packageContract.packageName}`,
@@ -368,6 +561,21 @@ export function verifyMutationReportSet(contract, artifactsDir) {
     const reportDigest = sha256Hex(reportFile.bytes);
     const resultDigest = sha256Hex(resultFile.bytes);
     const metrics = reportMetrics(reportFile.value, `mutation report ${packageContract.packageName}`);
+    if (composed) {
+      try {
+        if (
+          canonicalize(summary.packages[index].thresholds) !==
+          canonicalize(resultFile.value.thresholds)
+        ) {
+          mutationSummaryMismatch();
+        }
+      } catch (error) {
+        if (error instanceof VerificationError && error.code === 'MUTATION_SUMMARY_MISMATCH') {
+          throw error;
+        }
+        mutationSummaryMismatch();
+      }
+    }
     validatePackageResult(
       resultFile.value,
       packageContract,
@@ -378,33 +586,87 @@ export function verifyMutationReportSet(contract, artifactsDir) {
     );
     for (const status of MUTANT_STATUSES) aggregateTotals[status] += metrics.totals[status];
     durationMs += resultFile.value.durationMs;
-    summaryEntries.push({
-      packageName: packageContract.packageName,
-      workspace: packageContract.workspace,
-      resultPath: packageContract.resultPath,
-      reportPath: packageContract.reportPath,
-      resultDigest,
-      reportDigest,
-      score: metrics.score,
-      passed: true,
-    });
+    if (composed) {
+      const fresh = Object.hasOwn(resultFile.value, 'process');
+      if (fresh) {
+        freshPackageCount += 1;
+        freshDurationMs += resultFile.value.durationMs;
+      }
+      summaryEntries.push({
+        baselineCommit: fresh ? null : composedMetadata.baseline.commit,
+        baselineTree: fresh ? null : composedMetadata.baseline.tree,
+        durationMs: resultFile.value.durationMs,
+        inputProjectionDigest: composedInputProjectionDigest(summary.packages[index], index),
+        packageName: packageContract.packageName,
+        passed: true,
+        ...(fresh && { process: resultFile.value.process }),
+        provenance: fresh ? 'fresh' : 'reused',
+        reportDigest,
+        reportPath: packageContract.reportPath,
+        resultDigest,
+        resultPath: packageContract.resultPath,
+        score: metrics.score,
+        statusTotals: metrics.totals,
+        targetCensus: metrics.targetCensus,
+        thresholds: packageContract.thresholds,
+        workspace: packageContract.workspace,
+      });
+    } else {
+      summaryEntries.push({
+        packageName: packageContract.packageName,
+        workspace: packageContract.workspace,
+        resultPath: packageContract.resultPath,
+        reportPath: packageContract.reportPath,
+        resultDigest,
+        reportDigest,
+        score: metrics.score,
+        passed: true,
+      });
+    }
   }
   const detected = aggregateTotals.Killed + aggregateTotals.Timeout;
   const scored = detected + aggregateTotals.Survived + aggregateTotals.NoCoverage;
   const aggregateScore = scored === 0 ? 100 : (detected / scored) * 100;
-  const expectedSummary = {
-    schemaVersion: '1.0.0',
-    kind: 'mutation-report-set-v1',
-    complete: true,
-    passed: true,
-    packages: summaryEntries,
-    aggregate: {
-      packageCount: contract.expectedPackageCount,
-      durationMs,
-      score: aggregateScore,
-      statusTotals: aggregateTotals,
-    },
-  };
+  const reusedPackageCount = contract.expectedPackageCount - freshPackageCount;
+  if (composed && (freshPackageCount === 0 || reusedPackageCount === 0)) {
+    mutationSummaryMismatch();
+  }
+  const expectedSummary = composed
+    ? {
+        schemaVersion: '1.0.0',
+        kind: 'mutation-composed-report-set-v1',
+        candidate: {
+          commit: options.candidateCommit,
+          tree: options.candidateTree,
+        },
+        baseline: composedMetadata.baseline,
+        semanticRebindComparison: composedMetadata.semanticRebindComparison,
+        complete: true,
+        passed: true,
+        packages: summaryEntries,
+        aggregate: {
+          packageCount: contract.expectedPackageCount,
+          freshPackageCount,
+          reusedPackageCount,
+          durationMs,
+          freshDurationMs,
+          score: aggregateScore,
+          statusTotals: aggregateTotals,
+        },
+      }
+    : {
+        schemaVersion: '1.0.0',
+        kind: 'mutation-report-set-v1',
+        complete: true,
+        passed: true,
+        packages: summaryEntries,
+        aggregate: {
+          packageCount: contract.expectedPackageCount,
+          durationMs,
+          score: aggregateScore,
+          statusTotals: aggregateTotals,
+        },
+      };
   if (canonicalize(summary) !== canonicalize(expectedSummary)) {
     throw new VerificationError('MUTATION_SUMMARY_MISMATCH', 'mutation summary does not match reports');
   }

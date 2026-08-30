@@ -222,7 +222,7 @@ function filesBelow(root, current = root) {
   return files;
 }
 
-function verifyArtifacts(policy, results, artifactsDir) {
+function verifyArtifacts(policy, results, artifactsDir, candidate) {
   const expectedPaths = artifactPaths(policy);
   if (expectedPaths.length === 0) return { paths: [], mutation: [] };
   if (typeof artifactsDir !== 'string') {
@@ -278,7 +278,10 @@ function verifyArtifacts(policy, results, artifactsDir) {
   const mutation = [];
   for (const node of policy.requiredNodes) {
     if (node.outputContract.kind !== 'mutation-report-set-v1') continue;
-    mutation.push({ nodeId: node.nodeId, ...verifyMutationReportSet(node.outputContract, artifactsDir) });
+    mutation.push({
+      nodeId: node.nodeId,
+      ...verifyMutationReportSet(node.outputContract, artifactsDir, candidate),
+    });
   }
   return { paths: expectedPaths, mutation };
 }
@@ -408,7 +411,10 @@ export function verifyCandidateEvidence({
     }
   }
 
-  const verifiedArtifactSet = verifyArtifacts(taskPolicy, results, artifactsDir);
+  const verifiedArtifactSet = verifyArtifacts(taskPolicy, results, artifactsDir, {
+    candidateCommit: receipt.repository.commit,
+    candidateTree: receipt.repository.tree,
+  });
 
   return {
     ok: true,

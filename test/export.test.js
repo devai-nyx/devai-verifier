@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { canonicalize, sha256Hex } from '../src/canonical.js';
-import { exportCandidateEvidence } from '../src/export.js';
+import { exportCandidateEvidence, preflightCandidateEvidence } from '../src/export.js';
 import { buildExpectedTaskPolicy } from '../src/policy-builder.js';
 import { loadAndVerify } from '../src/verify.js';
 
@@ -180,6 +180,22 @@ function exportOptions(state) {
 }
 
 describe('trusted candidate evidence export', () => {
+  it('validates the complete export chain without writing an evidence bundle', () => {
+    const state = fixture({ portable: true });
+    const result = preflightCandidateEvidence(exportOptions(state));
+    assert.equal(result.artifactPaths.length, 1);
+    assert.equal(existsSync(state.outputDir), false);
+  });
+
+  it('fails a missing output parent with a stable preflight code before signing or execution', () => {
+    const state = fixture();
+    const missingParent = join(state.root, 'missing', 'evidence');
+    expectCode('OUTPUT_PARENT_MISSING', () =>
+      preflightCandidateEvidence({ ...exportOptions(state), outputDir: missingParent }),
+    );
+    assert.equal(existsSync(missingParent), false);
+  });
+
   it('independently rebuilds policy, signs, exports only required results, and verifies', () => {
     const state = fixture();
     const result = exportCandidateEvidence(exportOptions(state));

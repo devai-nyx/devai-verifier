@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { artifactMediaType } from './artifact-safety.js';
+import { artifactMediaType, validateArtifactContent } from './artifact-safety.js';
 import { VerificationError, canonicalBytes, canonicalize, readJson, sha256Hex } from './canonical.js';
 import {
   buildExpectedTaskPolicy,
@@ -37,15 +37,42 @@ function git(repo, args) {
 }
 
 function outsideRepository(repo, path, label) {
-  const root = realpathSync(repo);
+  let root;
+  try {
+    root = realpathSync(repo);
+  } catch {
+    throw new VerificationError('REPOSITORY_INVALID', 'candidate repository is unreadable');
+  }
   const absolute = resolve(path);
-  const resolvedParent = realpathSync(dirname(absolute));
+  let resolvedParent;
+  try {
+    resolvedParent = realpathSync(dirname(absolute));
+  } catch {
+    throw new VerificationError('INPUT_PARENT_MISSING', `${label} parent is unavailable`);
+  }
   const candidate = join(resolvedParent, absolute.slice(dirname(absolute).length + 1));
   const pathFromRoot = relative(root, candidate);
   if (pathFromRoot === '' || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== '..')) {
     throw new VerificationError('TRUST_BOUNDARY_INVALID', `${label} must be outside the candidate repository`);
   }
   return absolute;
+}
+
+function outputDestination(repo, path) {
+  const absolute = resolve(path);
+  const parent = dirname(absolute);
+  let parentStat;
+  try {
+    parentStat = lstatSync(parent);
+  } catch {
+    throw new VerificationError('OUTPUT_PARENT_MISSING', 'evidence output parent is unavailable');
+  }
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+    throw new VerificationError('OUTPUT_PARENT_INVALID', 'evidence output parent must be a real directory');
+  }
+  const output = outsideRepository(repo, absolute, 'output directory');
+  if (existsSync(output)) throw new VerificationError('OUTPUT_EXISTS', 'output directory already exists');
+  return output;
 }
 
 function controlledInput(repo, path, label) {
@@ -130,40 +157,29 @@ function declaredArtifactPaths(taskPolicy) {
   return [...paths].sort();
 }
 
-export function exportCandidateEvidence({
-  repo,
-  receiptPath,
-  resultsDir,
-  profile,
-  commit,
-  tree,
-  baseCommit,
-  toolchainPath,
-  environmentPath,
-  privateKeyPath,
-  publicKeyPath,
-  signerId,
-  outputDir,
-}) {
-  const repository = realpathSync(repo);
-  exactCandidate(repository, commit, tree);
-  validateSignerId(signerId);
-  const controlledToolchain = controlledInput(repository, toolchainPath, 'toolchain input');
-  const controlledEnvironment = controlledInput(repository, environmentPath, 'environment input');
-  const controlledPrivateKey = controlledInput(repository, privateKeyPath, 'private key');
-  const controlledPublicKey = controlledInput(repository, publicKeyPath, 'public key');
-  const output = outsideRepository(repository, outputDir, 'output directory');
-  if (existsSync(output)) throw new VerificationError('OUTPUT_EXISTS', 'output directory already exists');
-
-  const descriptor = readCommittedDescriptor(repository, commit);
-  const receipt = readJson(receiptPath, 'candidate receipt');
+export function preflightCandidateEvidence(options) {
+  let repository;
+  try {
+    repository = realpathSync(options.repo);
+  } catch {
+    throw new VerificationError('REPOSITORY_INVALID', 'candidate repository is unreadable');
+  }
+  exactCandidate(repository, options.commit, options.tree);
+  validateSignerId(options.signerId);
+  const controlledToolchain = controlledInput(repository, options.toolchainPath, 'toolchain input');
+  const controlledEnvironment = controlledInput(repository, options.environmentPath, 'environment input');
+  const controlledPrivateKey = controlledInput(repository, options.privateKeyPath, 'private key');
+  const controlledPublicKey = controlledInput(repository, options.publicKeyPath, 'public key');
+  const output = outputDestination(repository, options.outputDir);
+  const descriptor = readCommittedDescriptor(repository, options.commit);
+  const receipt = readJson(options.receiptPath, 'candidate receipt');
   const built = buildExpectedTaskPolicy({
     repo: repository,
     descriptor,
-    profileId: profile,
-    candidateCommit: commit,
-    expectedTree: tree,
-    baseCommit,
+    profileId: options.profile,
+    candidateCommit: options.commit,
+    expectedTree: options.tree,
+    baseCommit: options.baseCommit,
     toolchain: readStringMap(controlledToolchain, 'toolchain'),
     environment: readEnvironmentMap(controlledEnvironment, 'environment'),
     policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
@@ -171,23 +187,34 @@ export function exportCandidateEvidence({
   const payload = canonicalBytes(receipt);
   const keys = matchingKeyPair(controlledPrivateKey, controlledPublicKey);
   const envelope = {
-    schemaVersion: '1.0.0',
-    payloadType: PAYLOAD_TYPE,
-    payload: payload.toString('base64'),
-    signatures: [
-      { signerId, signature: sign(null, payload, keys.privateKey).toString('base64') },
-    ],
+    schemaVersion: '1.0.0', payloadType: PAYLOAD_TYPE, payload: payload.toString('base64'),
+    signatures: [{ signerId: options.signerId, signature: sign(null, payload, keys.privateKey).toString('base64') }],
   };
   const trustStore = {
     schemaVersion: '1.0.0',
-    trustedSigners: [
-      {
-        signerId,
-        publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
-      },
-    ],
+    trustedSigners: [{ signerId: options.signerId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }],
     revokedSignerIds: [],
   };
+  const artifactPaths = declaredArtifactPaths(built.taskPolicy);
+  for (const path of artifactPaths) {
+    const absolute = join(repository, path);
+    let stat;
+    try {
+      stat = lstatSync(absolute);
+    } catch {
+      throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unavailable`);
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new VerificationError('ARTIFACT_INVALID', `artifact ${path} must be a regular non-symlink file`);
+    }
+    validateArtifactContent({ bytes: readFileSync(absolute), path, mediaType: artifactMediaType(path) });
+  }
+  return { repository, output, descriptor, receipt, built, envelope, trustStore, artifactPaths };
+}
+
+export function exportCandidateEvidence(options) {
+  const { repository, output, descriptor, receipt, built, envelope, trustStore } = preflightCandidateEvidence(options);
+  const { resultsDir, signerId, commit, tree, profile } = options;
 
   const staging = mkdtempSync(join(dirname(output), '.devai-evidence-export-'));
   try {
