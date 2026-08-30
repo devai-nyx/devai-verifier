@@ -14,12 +14,14 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { artifactMediaType, validateArtifactContent } from './artifact-safety.js';
-import { VerificationError, canonicalBytes, canonicalize, readJson, sha256Hex } from './canonical.js';
 import {
-  buildExpectedTaskPolicy,
-  readEnvironmentMap,
-  readStringMap,
-} from './policy-builder.js';
+  VerificationError,
+  canonicalBytes,
+  canonicalize,
+  readJson,
+  sha256Hex,
+} from './canonical.js';
+import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
 import { PAYLOAD_TYPE, verifyCandidateEvidence } from './verify.js';
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -53,7 +55,10 @@ function outsideRepository(repo, path, label) {
   const candidate = join(resolvedParent, absolute.slice(dirname(absolute).length + 1));
   const pathFromRoot = relative(root, candidate);
   if (pathFromRoot === '' || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== '..')) {
-    throw new VerificationError('TRUST_BOUNDARY_INVALID', `${label} must be outside the candidate repository`);
+    throw new VerificationError(
+      'TRUST_BOUNDARY_INVALID',
+      `${label} must be outside the candidate repository`,
+    );
   }
   return absolute;
 }
@@ -68,10 +73,14 @@ function outputDestination(repo, path) {
     throw new VerificationError('OUTPUT_PARENT_MISSING', 'evidence output parent is unavailable');
   }
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
-    throw new VerificationError('OUTPUT_PARENT_INVALID', 'evidence output parent must be a real directory');
+    throw new VerificationError(
+      'OUTPUT_PARENT_INVALID',
+      'evidence output parent must be a real directory',
+    );
   }
   const output = outsideRepository(repo, absolute, 'output directory');
-  if (existsSync(output)) throw new VerificationError('OUTPUT_EXISTS', 'output directory already exists');
+  if (existsSync(output))
+    throw new VerificationError('OUTPUT_EXISTS', 'output directory already exists');
   return output;
 }
 
@@ -79,7 +88,10 @@ function controlledInput(repo, path, label) {
   const absolute = outsideRepository(repo, path, label);
   const stat = lstatSync(absolute);
   if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new VerificationError('TRUST_BOUNDARY_INVALID', `${label} must be a regular non-symlink file`);
+    throw new VerificationError(
+      'TRUST_BOUNDARY_INVALID',
+      `${label} must be a regular non-symlink file`,
+    );
   }
   return absolute;
 }
@@ -92,12 +104,18 @@ function readCommittedDescriptor(repo, commit) {
       maxBuffer: 16 * 1024 * 1024,
     });
   } catch (error) {
-    throw new VerificationError('DESCRIPTOR_MISSING', `committed test-tasks.json is unreadable: ${error.message}`);
+    throw new VerificationError(
+      'DESCRIPTOR_MISSING',
+      `committed test-tasks.json is unreadable: ${error.message}`,
+    );
   }
   try {
     return JSON.parse(text);
   } catch (error) {
-    throw new VerificationError('MALFORMED_JSON', `committed test-tasks.json is invalid: ${error.message}`);
+    throw new VerificationError(
+      'MALFORMED_JSON',
+      `committed test-tasks.json is invalid: ${error.message}`,
+    );
   }
 }
 
@@ -109,7 +127,10 @@ function exactCandidate(repo, commit, tree) {
     throw new VerificationError('DIRTY_CANDIDATE', 'candidate repository must be clean');
   }
   if (git(repo, ['rev-parse', 'HEAD']) !== commit) {
-    throw new VerificationError('COMMIT_MISMATCH', 'candidate HEAD does not match requested commit');
+    throw new VerificationError(
+      'COMMIT_MISMATCH',
+      'candidate HEAD does not match requested commit',
+    );
   }
   if (git(repo, ['rev-parse', `${commit}^{tree}`]) !== tree) {
     throw new VerificationError('TREE_MISMATCH', 'candidate tree does not match requested tree');
@@ -122,7 +143,10 @@ function matchingKeyPair(privateKeyPath, publicKeyPath) {
   if (privateKey.asymmetricKeyType !== 'ed25519' || publicKey.asymmetricKeyType !== 'ed25519') {
     throw new VerificationError('KEY_INVALID', 'signing key pair must use Ed25519');
   }
-  const derived = createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+  const derived = createPublicKey(privateKey).export({
+    type: 'spki',
+    format: 'der',
+  });
   const supplied = publicKey.export({ type: 'spki', format: 'der' });
   if (!derived.equals(supplied)) {
     throw new VerificationError('KEY_MISMATCH', 'private and public key do not form a pair');
@@ -131,7 +155,8 @@ function matchingKeyPair(privateKeyPath, publicKeyPath) {
 }
 
 function validateSignerId(value) {
-  if (!IDENTIFIER.test(value)) throw new VerificationError('SCHEMA_INVALID', 'signer ID is invalid');
+  if (!IDENTIFIER.test(value))
+    throw new VerificationError('SCHEMA_INVALID', 'signer ID is invalid');
 }
 
 function copyRegularFile(source, destination, label) {
@@ -167,7 +192,11 @@ export function preflightCandidateEvidence(options) {
   exactCandidate(repository, options.commit, options.tree);
   validateSignerId(options.signerId);
   const controlledToolchain = controlledInput(repository, options.toolchainPath, 'toolchain input');
-  const controlledEnvironment = controlledInput(repository, options.environmentPath, 'environment input');
+  const controlledEnvironment = controlledInput(
+    repository,
+    options.environmentPath,
+    'environment input',
+  );
   const controlledPrivateKey = controlledInput(repository, options.privateKeyPath, 'private key');
   const controlledPublicKey = controlledInput(repository, options.publicKeyPath, 'public key');
   const output = outputDestination(repository, options.outputDir);
@@ -187,12 +216,24 @@ export function preflightCandidateEvidence(options) {
   const payload = canonicalBytes(receipt);
   const keys = matchingKeyPair(controlledPrivateKey, controlledPublicKey);
   const envelope = {
-    schemaVersion: '1.0.0', payloadType: PAYLOAD_TYPE, payload: payload.toString('base64'),
-    signatures: [{ signerId: options.signerId, signature: sign(null, payload, keys.privateKey).toString('base64') }],
+    schemaVersion: '1.0.0',
+    payloadType: PAYLOAD_TYPE,
+    payload: payload.toString('base64'),
+    signatures: [
+      {
+        signerId: options.signerId,
+        signature: sign(null, payload, keys.privateKey).toString('base64'),
+      },
+    ],
   };
   const trustStore = {
     schemaVersion: '1.0.0',
-    trustedSigners: [{ signerId: options.signerId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }],
+    trustedSigners: [
+      {
+        signerId: options.signerId,
+        publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      },
+    ],
     revokedSignerIds: [],
   };
   const artifactPaths = declaredArtifactPaths(built.taskPolicy);
@@ -205,15 +246,32 @@ export function preflightCandidateEvidence(options) {
       throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unavailable`);
     }
     if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new VerificationError('ARTIFACT_INVALID', `artifact ${path} must be a regular non-symlink file`);
+      throw new VerificationError(
+        'ARTIFACT_INVALID',
+        `artifact ${path} must be a regular non-symlink file`,
+      );
     }
-    validateArtifactContent({ bytes: readFileSync(absolute), path, mediaType: artifactMediaType(path) });
+    validateArtifactContent({
+      bytes: readFileSync(absolute),
+      path,
+      mediaType: artifactMediaType(path),
+    });
   }
-  return { repository, output, descriptor, receipt, built, envelope, trustStore, artifactPaths };
+  return {
+    repository,
+    output,
+    descriptor,
+    receipt,
+    built,
+    envelope,
+    trustStore,
+    artifactPaths,
+  };
 }
 
 export function exportCandidateEvidence(options) {
-  const { repository, output, descriptor, receipt, built, envelope, trustStore } = preflightCandidateEvidence(options);
+  const { repository, output, descriptor, receipt, built, envelope, trustStore } =
+    preflightCandidateEvidence(options);
   const { resultsDir, signerId, commit, tree, profile } = options;
 
   const staging = mkdtempSync(join(dirname(output), '.devai-evidence-export-'));
@@ -225,7 +283,9 @@ export function exportCandidateEvidence(options) {
       flag: 'wx',
     });
     if (built.taskPolicy.schemaVersion === '1.0.0') {
-      writeFileSync(join(staging, 'trust-store.json'), `${canonicalize(trustStore)}\n`, { flag: 'wx' });
+      writeFileSync(join(staging, 'trust-store.json'), `${canonicalize(trustStore)}\n`, {
+        flag: 'wx',
+      });
     }
     for (const task of receipt.tasks) {
       copyRegularFile(
@@ -242,7 +302,10 @@ export function exportCandidateEvidence(options) {
         cursor = join(cursor, segment);
         const stat = lstatSync(cursor);
         if (stat.isSymbolicLink()) {
-          throw new VerificationError('ARTIFACT_SYMLINK', `artifact ${path} traverses a symbolic link`);
+          throw new VerificationError(
+            'ARTIFACT_SYMLINK',
+            `artifact ${path} traverses a symbolic link`,
+          );
         }
       }
       copyRegularFile(cursor, join(staging, 'artifacts', path), `artifact ${path}`);

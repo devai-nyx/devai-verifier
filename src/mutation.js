@@ -54,12 +54,20 @@ function mutationThresholds(policy, packageName, literalOverride) {
   }
   const override = policy.perPackage?.[packageName]?.mutation;
   if (typeof override === 'number') {
-    return { break: override, high: override, low: Math.max(60, override - 10) };
+    return {
+      break: override,
+      high: override,
+      low: Math.max(60, override - 10),
+    };
   }
   const policyName = override ?? policy.defaults?.mutation ?? 'default';
   const selected = policy.policies?.mutation?.[policyName];
   if (typeof selected === 'number') {
-    return { break: selected, high: selected, low: Math.max(60, selected - 10) };
+    return {
+      break: selected,
+      high: selected,
+      low: Math.max(60, selected - 10),
+    };
   }
   if (selected !== null && typeof selected === 'object' && typeof selected.break === 'number') {
     return {
@@ -125,9 +133,7 @@ export function resolveMutationDiscoveryContract(repo, commit, contract) {
       if (configs.length === 0) continue;
       assertString(manifest.name, `manifest ${manifestPath} package name`, PACKAGE_NAME);
       const configSource = git(repo, ['show', `${commit}:${configs[0]}`]);
-      const literalMatches = [
-        ...configSource.matchAll(/\bthreshold\s*:\s*(\d+(?:\.\d+)?)/gu),
-      ];
+      const literalMatches = [...configSource.matchAll(/\bthreshold\s*:\s*(\d+(?:\.\d+)?)/gu)];
       if (literalMatches.length > 1) {
         throw new VerificationError(
           'MUTATION_THRESHOLD_MISMATCH',
@@ -147,8 +153,14 @@ export function resolveMutationDiscoveryContract(repo, commit, contract) {
     }
   }
   packages.sort((left, right) => left.packageName.localeCompare(right.packageName));
-  if (packages.length === 0 || new Set(packages.map((entry) => entry.packageName)).size !== packages.length) {
-    throw new VerificationError('MUTATION_ROSTER_MISMATCH', 'mutation package roster is empty or duplicated');
+  if (
+    packages.length === 0 ||
+    new Set(packages.map((entry) => entry.packageName)).size !== packages.length
+  ) {
+    throw new VerificationError(
+      'MUTATION_ROSTER_MISMATCH',
+      'mutation package roster is empty or duplicated',
+    );
   }
   const artifactPaths = [
     contract.summaryPath,
@@ -165,7 +177,10 @@ export function resolveMutationDiscoveryContract(repo, commit, contract) {
 
 function assertNonnegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label} must be a nonnegative integer`);
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label} must be a nonnegative integer`,
+    );
   }
 }
 
@@ -193,7 +208,8 @@ function validateThresholds(value, label) {
 
 function validateStatusTotals(value, label) {
   assertExactKeys(value, MUTANT_STATUSES, label);
-  for (const status of MUTANT_STATUSES) assertNonnegativeInteger(value[status], `${label}.${status}`);
+  for (const status of MUTANT_STATUSES)
+    assertNonnegativeInteger(value[status], `${label}.${status}`);
 }
 
 function validateSuccessfulProcess(value, label) {
@@ -216,12 +232,18 @@ function readCanonicalJson(path, label) {
     text = readFileSync(path, 'utf8');
     value = JSON.parse(text);
   } catch (error) {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label} is unreadable: ${error.message}`);
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label} is unreadable: ${error.message}`,
+    );
   }
   if (text !== canonicalize(value) && text !== `${canonicalize(value)}\n`) {
     throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
   }
-  return { value, bytes: Buffer.from(text.endsWith('\n') ? text.slice(0, -1) : text, 'utf8') };
+  return {
+    value,
+    bytes: Buffer.from(text.endsWith('\n') ? text.slice(0, -1) : text, 'utf8'),
+  };
 }
 
 function reportMetrics(report, label) {
@@ -230,12 +252,18 @@ function reportMetrics(report, label) {
   assertObject(report.testFiles, `${label}.testFiles`);
   assertObject(report.config, `${label}.config`);
   if (Object.keys(report.config).length !== 0) {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label}.config must be normalized to {}`);
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label}.config must be normalized to {}`,
+    );
   }
   assertObject(report.thresholds, `${label}.thresholds`);
   validateThresholds(report.thresholds, `${label}.thresholds`);
   if (report.projectRoot !== '.') {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label}.projectRoot must be normalized to .`);
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label}.projectRoot must be normalized to .`,
+    );
   }
   for (const testFile of Object.keys(report.testFiles)) {
     assertString(testFile, `${label} test file`, PORTABLE_PATH);
@@ -245,12 +273,18 @@ function reportMetrics(report, label) {
     assertString(file, `${label} file`, PORTABLE_PATH);
     assertObject(fileResult, `${label}.files.${file}`);
     if (!Array.isArray(fileResult.mutants)) {
-      throw new VerificationError('MUTATION_REPORT_INVALID', `${label}.files.${file}.mutants must be an array`);
+      throw new VerificationError(
+        'MUTATION_REPORT_INVALID',
+        `${label}.files.${file}.mutants must be an array`,
+      );
     }
     for (const mutant of fileResult.mutants) {
       assertObject(mutant, `${label} mutant`);
       if (!MUTANT_STATUSES.includes(mutant.status)) {
-        throw new VerificationError('MUTATION_REPORT_INVALID', `${label} has unknown mutant status`);
+        throw new VerificationError(
+          'MUTATION_REPORT_INVALID',
+          `${label} has unknown mutant status`,
+        );
       }
       totals[mutant.status] += 1;
     }
@@ -314,7 +348,10 @@ export function validateMutationContract(contract, label) {
   const expected = [...declaredPaths].sort();
   const actual = [...contract.paths].sort();
   if (actual.length !== expected.length || actual.some((path, index) => path !== expected[index])) {
-    throw new VerificationError('SCHEMA_INVALID', `${label}.paths differs from the mutation artifact roster`);
+    throw new VerificationError(
+      'SCHEMA_INVALID',
+      `${label}.paths differs from the mutation artifact roster`,
+    );
   }
 }
 
@@ -334,20 +371,25 @@ function validatePackageResult(result, contract, report, reportDigest, metrics, 
     'workspace',
   ];
   if (Object.hasOwn(result, 'process')) keys.push('process');
-  assertExactKeys(
-    result,
-    keys,
-    label,
-  );
+  assertExactKeys(result, keys, label);
   if (result.schemaVersion !== '1.0.0' || result.kind !== 'mutation-package-result-v1') {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label} schema or kind is unsupported`);
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label} schema or kind is unsupported`,
+    );
   }
   if (result.packageName !== contract.packageName || result.workspace !== contract.workspace) {
     throw new VerificationError('MUTATION_ROSTER_MISMATCH', `${label} package identity differs`);
   }
   validateThresholds(result.thresholds, `${label}.thresholds`);
-  if (canonicalize(result.thresholds) !== canonicalize(contract.thresholds) || canonicalize(report.thresholds) !== canonicalize(contract.thresholds)) {
-    throw new VerificationError('MUTATION_THRESHOLD_MISMATCH', `${label} thresholds differ from policy`);
+  if (
+    canonicalize(result.thresholds) !== canonicalize(contract.thresholds) ||
+    canonicalize(report.thresholds) !== canonicalize(contract.thresholds)
+  ) {
+    throw new VerificationError(
+      'MUTATION_THRESHOLD_MISMATCH',
+      `${label} thresholds differ from policy`,
+    );
   }
   assertFiniteNumber(result.score, `${label}.score`);
   validateStatusTotals(result.statusTotals, `${label}.statusTotals`);
@@ -355,7 +397,10 @@ function validatePackageResult(result, contract, report, reportDigest, metrics, 
   assertString(result.reportDigest, `${label}.reportDigest`, SHA256);
   assertObject(result.toolVersions, `${label}.toolVersions`);
   if (Object.keys(result.toolVersions).length === 0) {
-    throw new VerificationError('MUTATION_REPORT_INVALID', `${label}.toolVersions must be nonempty`);
+    throw new VerificationError(
+      'MUTATION_REPORT_INVALID',
+      `${label}.toolVersions must be nonempty`,
+    );
   }
   for (const [tool, version] of Object.entries(result.toolVersions)) {
     assertString(tool, `${label} tool`);
@@ -367,12 +412,21 @@ function validatePackageResult(result, contract, report, reportDigest, metrics, 
   if (result.reportDigest !== reportDigest) {
     throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `${label} report digest differs`);
   }
-  if (canonicalize(result.statusTotals) !== canonicalize(metrics.totals) || result.score !== metrics.score) {
-    throw new VerificationError('MUTATION_METRIC_MISMATCH', `${label} metrics do not match the canonical report`);
+  if (
+    canonicalize(result.statusTotals) !== canonicalize(metrics.totals) ||
+    result.score !== metrics.score
+  ) {
+    throw new VerificationError(
+      'MUTATION_METRIC_MISMATCH',
+      `${label} metrics do not match the canonical report`,
+    );
   }
   const passed = metrics.score >= contract.thresholds.break;
   if (result.passed !== passed || !passed) {
-    throw new VerificationError('MUTATION_THRESHOLD_FAILED', `${label} does not satisfy the break threshold`);
+    throw new VerificationError(
+      'MUTATION_THRESHOLD_FAILED',
+      `${label} does not satisfy the break threshold`,
+    );
   }
 }
 
@@ -421,9 +475,16 @@ function validateComposedSummary(summary, candidateCommit, candidateTree, expect
     );
     assertString(summary.baseline.commit, 'composed mutation baseline.commit', GIT_OBJECT);
     assertString(summary.baseline.tree, 'composed mutation baseline.tree', GIT_OBJECT);
-    assertNonnegativeInteger(summary.baseline.summaryBytes, 'composed mutation baseline.summaryBytes');
+    assertNonnegativeInteger(
+      summary.baseline.summaryBytes,
+      'composed mutation baseline.summaryBytes',
+    );
     if (summary.baseline.summaryBytes === 0) mutationSummaryMismatch();
-    assertString(summary.baseline.summarySha256, 'composed mutation baseline.summarySha256', SHA256);
+    assertString(
+      summary.baseline.summarySha256,
+      'composed mutation baseline.summarySha256',
+      SHA256,
+    );
 
     const semantic = summary.semanticRebindComparison;
     assertExactKeys(
@@ -459,11 +520,7 @@ function validateComposedSummary(summary, candidateCommit, candidateTree, expect
     );
     assertExactKeys(
       semantic.comparison,
-      [
-        'historicalMutationInputTreeEntries',
-        'otherMutationInputTreeEntries',
-        'rootManifest',
-      ],
+      ['historicalMutationInputTreeEntries', 'otherMutationInputTreeEntries', 'rootManifest'],
       'composed mutation semantic comparison.comparison',
     );
     if (
@@ -533,7 +590,10 @@ function composedInputProjectionDigest(entry, index) {
 
 export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   validateMutationContract(contract, 'mutation output contract');
-  const summaryFile = readCanonicalJson(join(artifactsDir, contract.summaryPath), 'mutation summary');
+  const summaryFile = readCanonicalJson(
+    join(artifactsDir, contract.summaryPath),
+    'mutation summary',
+  );
   const summary = summaryFile.value;
   const composed = summary?.kind === 'mutation-composed-report-set-v1';
   const composedMetadata = composed
@@ -560,7 +620,10 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
     );
     const reportDigest = sha256Hex(reportFile.bytes);
     const resultDigest = sha256Hex(resultFile.bytes);
-    const metrics = reportMetrics(reportFile.value, `mutation report ${packageContract.packageName}`);
+    const metrics = reportMetrics(
+      reportFile.value,
+      `mutation report ${packageContract.packageName}`,
+    );
     if (composed) {
       try {
         if (
@@ -668,7 +731,10 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
         },
       };
   if (canonicalize(summary) !== canonicalize(expectedSummary)) {
-    throw new VerificationError('MUTATION_SUMMARY_MISMATCH', 'mutation summary does not match reports');
+    throw new VerificationError(
+      'MUTATION_SUMMARY_MISMATCH',
+      'mutation summary does not match reports',
+    );
   }
   return {
     packageCount: contract.expectedPackageCount,

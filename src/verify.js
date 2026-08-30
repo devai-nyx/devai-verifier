@@ -101,7 +101,10 @@ function validateTrustStore(trust) {
     try {
       key = createPublicKey(signer.publicKeyPem);
     } catch (error) {
-      throw new VerificationError('SCHEMA_INVALID', `${label} has an invalid public key: ${error.message}`);
+      throw new VerificationError(
+        'SCHEMA_INVALID',
+        `${label} has an invalid public key: ${error.message}`,
+      );
     }
     if (key.asymmetricKeyType !== 'ed25519') {
       throw new VerificationError('SCHEMA_INVALID', `${label} must contain an Ed25519 public key`);
@@ -123,7 +126,11 @@ function validateEnvelope(envelope) {
   }
   assertExactKeys(envelope.signatures[0], ['signature', 'signerId'], 'envelope signature');
   assertString(envelope.signatures[0].signerId, 'envelope signerId', IDENTIFIER);
-  assertString(envelope.signatures[0].signature, 'envelope signature bytes', /^[A-Za-z0-9+/]+={0,2}$/u);
+  assertString(
+    envelope.signatures[0].signature,
+    'envelope signature bytes',
+    /^[A-Za-z0-9+/]+={0,2}$/u,
+  );
 }
 
 function validateReceipt(receipt) {
@@ -217,7 +224,11 @@ function filesBelow(root, current = root) {
     }
     if (entry.isDirectory()) files.push(...filesBelow(root, absolute));
     else if (entry.isFile()) files.push(relative(root, absolute).split(sep).join('/'));
-    else throw new VerificationError('ARTIFACT_INVALID', 'artifact bundle contains a non-regular file');
+    else
+      throw new VerificationError(
+        'ARTIFACT_INVALID',
+        'artifact bundle contains a non-regular file',
+      );
   }
   return files;
 }
@@ -226,20 +237,29 @@ function verifyArtifacts(policy, results, artifactsDir, candidate) {
   const expectedPaths = artifactPaths(policy);
   if (expectedPaths.length === 0) return { paths: [], mutation: [] };
   if (typeof artifactsDir !== 'string') {
-    throw new VerificationError('ARTIFACTS_MISSING', 'schema 1.1 output artifacts directory is required');
+    throw new VerificationError(
+      'ARTIFACTS_MISSING',
+      'schema 1.1 output artifacts directory is required',
+    );
   }
   let actualPaths;
   try {
     actualPaths = filesBelow(resolve(artifactsDir)).sort();
   } catch (error) {
     if (error instanceof VerificationError) throw error;
-    throw new VerificationError('ARTIFACTS_MISSING', `artifact directory is unreadable: ${error.message}`);
+    throw new VerificationError(
+      'ARTIFACTS_MISSING',
+      `artifact directory is unreadable: ${error.message}`,
+    );
   }
   if (
     actualPaths.length !== expectedPaths.length ||
     actualPaths.some((path, index) => path !== expectedPaths[index])
   ) {
-    throw new VerificationError('ARTIFACT_POPULATION_MISMATCH', 'artifact population differs from policy');
+    throw new VerificationError(
+      'ARTIFACT_POPULATION_MISMATCH',
+      'artifact population differs from policy',
+    );
   }
   const policyById = new Map(policy.requiredNodes.map((node) => [node.nodeId, node]));
   for (const [nodeId, result] of results) {
@@ -250,7 +270,10 @@ function verifyArtifacts(policy, results, artifactsDir, candidate) {
       actualOutputNames.length !== expectedOutputNames.length ||
       actualOutputNames.some((name, index) => name !== expectedOutputNames[index])
     ) {
-      throw new VerificationError('OUTPUT_POPULATION_MISMATCH', `node ${nodeId} output population differs`);
+      throw new VerificationError(
+        'OUTPUT_POPULATION_MISMATCH',
+        `node ${nodeId} output population differs`,
+      );
     }
     for (const path of paths) {
       const absolute = resolve(artifactsDir, path);
@@ -262,16 +285,26 @@ function verifyArtifacts(policy, results, artifactsDir, candidate) {
       try {
         stat = lstatSync(absolute);
       } catch (error) {
-        throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unreadable: ${error.message}`);
+        throw new VerificationError(
+          'ARTIFACTS_MISSING',
+          `artifact ${path} is unreadable: ${error.message}`,
+        );
       }
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new VerificationError('ARTIFACT_INVALID', `artifact ${path} is not a regular file`);
       }
       const bytes = readFileSync(absolute);
-      validateArtifactContent({ bytes, path, mediaType: artifactMediaType(path) });
+      validateArtifactContent({
+        bytes,
+        path,
+        mediaType: artifactMediaType(path),
+      });
       const actualDigest = sha256Hex(bytes);
       if (result.outputDigests[path] !== actualDigest) {
-        throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `artifact ${path} digest does not match`);
+        throw new VerificationError(
+          'ARTIFACT_DIGEST_MISMATCH',
+          `artifact ${path} digest does not match`,
+        );
       }
     }
   }
@@ -306,12 +339,18 @@ export function verifyCandidateEvidence({
   assertString(expectedTree, 'expected tree', GIT_OBJECT);
   assertString(expectedPolicyDigest, 'expected policy digest', SHA256);
   if (bindingMode !== 'exact-commit' && bindingMode !== 'exact-tree') {
-    throw new VerificationError('SCHEMA_INVALID', 'binding mode must be exact-commit or exact-tree');
+    throw new VerificationError(
+      'SCHEMA_INVALID',
+      'binding mode must be exact-commit or exact-tree',
+    );
   }
 
   const actualPolicyDigest = sha256Hex(taskPolicy);
   if (actualPolicyDigest !== expectedPolicyDigest) {
-    throw new VerificationError('POLICY_DIGEST_MISMATCH', 'task-policy bytes do not match the pinned digest');
+    throw new VerificationError(
+      'POLICY_DIGEST_MISMATCH',
+      'task-policy bytes do not match the pinned digest',
+    );
   }
   if (taskPolicy.repositoryId !== expectedRepository) {
     throw new VerificationError('REPOSITORY_MISMATCH', 'task policy belongs to another repository');
@@ -342,14 +381,23 @@ export function verifyCandidateEvidence({
   try {
     receipt = JSON.parse(payloadBytes.toString('utf8'));
   } catch (error) {
-    throw new VerificationError('MALFORMED_JSON', `candidate receipt payload is invalid: ${error.message}`);
+    throw new VerificationError(
+      'MALFORMED_JSON',
+      `candidate receipt payload is invalid: ${error.message}`,
+    );
   }
   validateReceipt(receipt);
   if (!payloadBytes.equals(canonicalBytes(receipt))) {
-    throw new VerificationError('NON_CANONICAL_JSON', 'candidate receipt payload is not canonical JSON');
+    throw new VerificationError(
+      'NON_CANONICAL_JSON',
+      'candidate receipt payload is not canonical JSON',
+    );
   }
   if (receipt.repository.id !== expectedRepository) {
-    throw new VerificationError('REPOSITORY_MISMATCH', 'candidate receipt repository does not match');
+    throw new VerificationError(
+      'REPOSITORY_MISMATCH',
+      'candidate receipt repository does not match',
+    );
   }
   if (bindingMode === 'exact-commit' && receipt.repository.commit !== expectedCommit) {
     throw new VerificationError('COMMIT_MISMATCH', 'candidate receipt commit does not match');
@@ -358,7 +406,10 @@ export function verifyCandidateEvidence({
     throw new VerificationError('TREE_MISMATCH', 'candidate receipt tree does not match');
   }
   if (receipt.taskPolicyDigest !== expectedPolicyDigest) {
-    throw new VerificationError('POLICY_DIGEST_MISMATCH', 'candidate receipt policy digest does not match');
+    throw new VerificationError(
+      'POLICY_DIGEST_MISMATCH',
+      'candidate receipt policy digest does not match',
+    );
   }
 
   const expectedById = new Map(taskPolicy.requiredNodes.map((node) => [node.nodeId, node]));
@@ -384,7 +435,10 @@ export function verifyCandidateEvidence({
     }
     const result = readJson(join(resultsDir, `${task.resultDigest}.json`), `task result ${nodeId}`);
     if (sha256Hex(result) !== task.resultDigest) {
-      throw new VerificationError('RESULT_DIGEST_MISMATCH', `task result ${nodeId} digest does not match`);
+      throw new VerificationError(
+        'RESULT_DIGEST_MISMATCH',
+        `task result ${nodeId} digest does not match`,
+      );
     }
     validateTaskResult(result, `task result ${nodeId}`);
     if (result.nodeId !== nodeId || result.taskKey !== expected.taskKey) {
@@ -402,11 +456,17 @@ export function verifyCandidateEvidence({
       actualDependencies.length !== expectedDependencies.length ||
       actualDependencies.some((dependency, index) => dependency !== expectedDependencies[index])
     ) {
-      throw new VerificationError('DEPENDENCY_MISMATCH', `node ${nodeId} dependency population differs`);
+      throw new VerificationError(
+        'DEPENDENCY_MISMATCH',
+        `node ${nodeId} dependency population differs`,
+      );
     }
     for (const dependency of expectedDependencies) {
       if (result.dependencyResultDigests[dependency] !== receiptById.get(dependency).resultDigest) {
-        throw new VerificationError('DEPENDENCY_MISMATCH', `node ${nodeId} has a stale dependency result`);
+        throw new VerificationError(
+          'DEPENDENCY_MISMATCH',
+          `node ${nodeId} has a stale dependency result`,
+        );
       }
     }
   }

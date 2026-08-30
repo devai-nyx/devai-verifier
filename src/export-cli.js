@@ -34,7 +34,10 @@ function parse(argv) {
   }
   const missing = [...required].filter((name) => values[name] === undefined);
   if (missing.length > 0) {
-    throw new VerificationError('USAGE', `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`);
+    throw new VerificationError(
+      'USAGE',
+      `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`,
+    );
   }
   return values;
 }
@@ -64,9 +67,14 @@ try {
     signerId: values['signer-id'],
     outputDir: values['output-dir'],
   };
-  const result = values.preflight === 'true'
-    ? { ok: true, preflight: true, taskPolicyDigest: preflightCandidateEvidence(options).built.taskPolicyDigest }
-    : exportCandidateEvidence(options);
+  const result =
+    values.preflight === 'true'
+      ? {
+          ok: true,
+          preflight: true,
+          taskPolicyDigest: preflightCandidateEvidence(options).built.taskPolicyDigest,
+        }
+      : exportCandidateEvidence(options);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   if (error instanceof VerificationError) {
