@@ -1,11 +1,11 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalBytes, sha256Hex } from '../src/canonical.js';
+import { canonicalBytes, canonicalize, sha256Hex } from '../src/canonical.js';
 import { PAYLOAD_TYPE, verifyCandidateEvidence } from '../src/verify.js';
 
 const COMMIT = 'a'.repeat(40);
@@ -147,6 +147,223 @@ function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
 
+function composedEvidenceFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'devai-composed-verifier-'));
+  temporaryDirectories.push(root);
+  const resultsDir = join(root, 'results');
+  const artifactsDir = join(root, 'artifacts');
+  mkdirSync(resultsDir);
+  const approved = keyPair();
+  const taskKey = sha256Hex(Buffer.from('task:mutation'));
+  const baseline = {
+    commit: 'c'.repeat(40),
+    tree: 'd'.repeat(40),
+    summaryBytes: 512,
+    summarySha256: 'e'.repeat(64),
+  };
+  const packageContracts = [0, 1].map((index) => {
+    const stem = `package-${index}`;
+    return {
+      packageName: `@fixture/${stem}`,
+      workspace: `packages/${stem}`,
+      resultPath: `mutation/${stem}.result.json`,
+      reportPath: `mutation/${stem}.stryker.json`,
+      thresholds: { break: 90, high: 100, low: 90 },
+    };
+  });
+  const outputContract = {
+    kind: 'mutation-report-set-v1',
+    expectedPackageCount: 2,
+    summaryPath: 'mutation/summary.json',
+    packages: packageContracts,
+    paths: [
+      'mutation/summary.json',
+      ...packageContracts.flatMap((entry) => [entry.resultPath, entry.reportPath]),
+    ],
+  };
+  const summaryPackages = [];
+  const outputDigests = {
+    stderr: sha256Hex(Buffer.from('stderr')),
+    stdout: sha256Hex(Buffer.from('stdout')),
+  };
+  function putArtifact(path, value) {
+    const bytes = Buffer.from(`${canonicalize(value)}\n`);
+    mkdirSync(dirname(join(artifactsDir, path)), { recursive: true });
+    writeFileSync(join(artifactsDir, path), bytes);
+    outputDigests[path] = sha256Hex(bytes);
+  }
+  for (const [index, contract] of packageContracts.entries()) {
+    const fresh = index === 0;
+    const report = {
+      schemaVersion: '1',
+      projectRoot: '.',
+      thresholds: contract.thresholds,
+      files: {
+        [`src/package-${index}.ts`]: {
+          language: 'typescript',
+          mutants: [{ id: String(index), status: 'Killed' }],
+        },
+      },
+      testFiles: {},
+      config: {},
+      framework: { name: 'StrykerJS', branding: {} },
+    };
+    const reportDigest = sha256Hex(Buffer.from(canonicalize(report)));
+    const process = { errorAbsent: true, signal: null, status: 0 };
+    const packageResult = {
+      schemaVersion: '1.0.0',
+      kind: 'mutation-package-result-v1',
+      packageName: contract.packageName,
+      workspace: contract.workspace,
+      passed: true,
+      durationMs: index + 1,
+      toolVersions: { stryker: '9.6.1' },
+      thresholds: contract.thresholds,
+      score: 100,
+      statusTotals: {
+        CompileError: 0,
+        Ignored: 0,
+        Killed: 1,
+        NoCoverage: 0,
+        Pending: 0,
+        RuntimeError: 0,
+        Survived: 0,
+        Timeout: 0,
+      },
+      reportDigest,
+      ...(fresh && { process }),
+    };
+    const resultDigest = sha256Hex(Buffer.from(canonicalize(packageResult)));
+    summaryPackages.push({
+      baselineCommit: fresh ? null : baseline.commit,
+      baselineTree: fresh ? null : baseline.tree,
+      durationMs: index + 1,
+      inputProjectionDigest: sha256Hex(Buffer.from(`input:${index}`)),
+      packageName: contract.packageName,
+      passed: true,
+      ...(fresh && { process }),
+      provenance: fresh ? 'fresh' : 'reused',
+      reportDigest,
+      reportPath: contract.reportPath,
+      resultDigest,
+      resultPath: contract.resultPath,
+      score: 100,
+      statusTotals: packageResult.statusTotals,
+      targetCensus: { targetFileCount: 1, totalMutants: 1 },
+      thresholds: contract.thresholds,
+      workspace: contract.workspace,
+    });
+    putArtifact(contract.reportPath, report);
+    putArtifact(contract.resultPath, packageResult);
+  }
+  const summary = {
+    schemaVersion: '1.0.0',
+    kind: 'mutation-composed-report-set-v1',
+    candidate: { commit: COMMIT, tree: TREE },
+    baseline,
+    semanticRebindComparison: {
+      kind: 'root-manifest-unchanged-with-historical-input-v1',
+      allowedScriptTransitions: [],
+      canonicalContractBytes: 128,
+      canonicalContractSha256: 'f'.repeat(64),
+      comparison: {
+        historicalMutationInputTreeEntries:
+          'match-explicit-historical-candidate-mode-type-oid',
+        otherMutationInputTreeEntries: 'identical-mode-type-oid',
+        rootManifest: 'source-and-target-identical',
+      },
+      sourceRootManifest: {
+        bytes: 100,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
+      targetRootManifest: {
+        bytes: 100,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
+    },
+    complete: true,
+    passed: true,
+    packages: summaryPackages,
+    aggregate: {
+      packageCount: 2,
+      freshPackageCount: 1,
+      reusedPackageCount: 1,
+      durationMs: 3,
+      freshDurationMs: 1,
+      score: 100,
+      statusTotals: {
+        CompileError: 0,
+        Ignored: 0,
+        Killed: 2,
+        NoCoverage: 0,
+        Pending: 0,
+        RuntimeError: 0,
+        Survived: 0,
+        Timeout: 0,
+      },
+    },
+  };
+  putArtifact(outputContract.summaryPath, summary);
+  const taskResult = result('test:mutation', taskKey);
+  taskResult.outputDigests = outputDigests;
+  let resultDigest = sha256Hex(taskResult);
+  writeFileSync(join(resultsDir, `${resultDigest}.json`), JSON.stringify(taskResult));
+  const taskPolicy = {
+    schemaVersion: '1.1.0',
+    repositoryId: 'devaii',
+    requiredNodes: [
+      { nodeId: 'test:mutation', taskKey, dependencies: [], outputContract },
+    ],
+  };
+  const policyDigest = sha256Hex(taskPolicy);
+  const receipt = {
+    schemaVersion: '1.1.0',
+    repository: { id: 'devaii', commit: COMMIT, tree: TREE },
+    profile: 'rc',
+    taskPolicyDigest: policyDigest,
+    createdAt: NOW,
+    tasks: [{ nodeId: 'test:mutation', taskKey, resultDigest }],
+  };
+  const trustStore = {
+    schemaVersion: '1.0.0',
+    trustedSigners: [
+      {
+        signerId: 'owner-workstation',
+        publicKeyPem: approved.publicKey.export({ type: 'spki', format: 'pem' }),
+      },
+    ],
+    revokedSignerIds: [],
+  };
+  const state = {
+    root,
+    resultsDir,
+    artifactsDir,
+    approved,
+    taskKey,
+    taskPolicy,
+    policyDigest,
+    receipt,
+    trustStore,
+    envelope: signedEnvelope(receipt, approved.privateKey),
+    summary,
+    taskResult,
+    outputContract,
+  };
+  state.rewriteSummary = () => {
+    const summaryBytes = Buffer.from(`${canonicalize(state.summary)}\n`);
+    writeFileSync(join(state.artifactsDir, state.outputContract.summaryPath), summaryBytes);
+    state.taskResult.outputDigests[state.outputContract.summaryPath] = sha256Hex(summaryBytes);
+    unlinkSync(join(state.resultsDir, `${resultDigest}.json`));
+    resultDigest = sha256Hex(state.taskResult);
+    state.receipt.tasks[0].resultDigest = resultDigest;
+    writeFileSync(join(state.resultsDir, `${resultDigest}.json`), JSON.stringify(state.taskResult));
+    state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
+  };
+  return state;
+}
+
 describe('candidate-independent evidence verification', () => {
   it('accepts an exact canonical receipt with complete current PASS results', () => {
     const state = fixture();
@@ -232,6 +449,34 @@ describe('candidate-independent evidence verification', () => {
 
     delete state.taskPolicy.requiredNodes[0].outputContract;
     expectCode('SCHEMA_INVALID', () => verify(state));
+  });
+
+  it('passes the signed receipt candidate into composed mutation verification', () => {
+    const state = composedEvidenceFixture();
+    const verified = verify(state, { artifactsDir: state.artifactsDir });
+    assert.deepEqual(verified.verifiedMutation, [
+      {
+        nodeId: 'test:mutation',
+        packageCount: 2,
+        score: 100,
+        statusTotals: {
+          CompileError: 0,
+          Ignored: 0,
+          Killed: 2,
+          NoCoverage: 0,
+          Pending: 0,
+          RuntimeError: 0,
+          Survived: 0,
+          Timeout: 0,
+        },
+      },
+    ]);
+
+    state.summary.candidate.commit = '9'.repeat(40);
+    state.rewriteSummary();
+    expectCode('MUTATION_SUMMARY_MISMATCH', () =>
+      verify(state, { artifactsDir: state.artifactsDir }),
+    );
   });
 
   it('rejects revoked and untrusted signers', () => {
