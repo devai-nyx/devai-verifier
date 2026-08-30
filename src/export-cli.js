@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { VerificationError } from './canonical.js';
-import { exportCandidateEvidence } from './export.js';
+import { exportCandidateEvidence, preflightCandidateEvidence } from './export.js';
 
 const required = new Set([
   'repo',
@@ -16,7 +16,7 @@ const required = new Set([
   'signer-id',
   'output-dir',
 ]);
-const optional = new Set(['base']);
+const optional = new Set(['base', 'preflight']);
 
 function parse(argv) {
   const values = {};
@@ -46,7 +46,10 @@ function emitError(code, message, exitCode) {
 
 try {
   const values = parse(process.argv.slice(2));
-  const result = exportCandidateEvidence({
+  if (values.preflight !== undefined && values.preflight !== 'true') {
+    throw new VerificationError('USAGE', '--preflight must be true when supplied');
+  }
+  const options = {
     repo: values.repo,
     receiptPath: values.receipt,
     resultsDir: values['results-dir'],
@@ -60,7 +63,10 @@ try {
     publicKeyPath: values['public-key'],
     signerId: values['signer-id'],
     outputDir: values['output-dir'],
-  });
+  };
+  const result = values.preflight === 'true'
+    ? { ok: true, preflight: true, taskPolicyDigest: preflightCandidateEvidence(options).built.taskPolicyDigest }
+    : exportCandidateEvidence(options);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   if (error instanceof VerificationError) {
