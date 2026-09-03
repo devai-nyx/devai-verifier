@@ -21,9 +21,13 @@ import { PAYLOAD_TYPE } from '../src/verify.js';
 
 const temporaryDirectories = [];
 const V21_SCHEMA = '2.1.0';
-const INPUT_DOMAIN = 'devai:mutation-input:v2.1\0';
-const COMPOSITION_DOMAIN = 'devai:mutation-composition:v2.1\0';
-const SEMANTIC_RECEIPT_DOMAIN = 'devai:mutation-semantic-receipt:v2.1\0';
+const INPUT_DOMAIN = 'devai:mutation-input:v2.1';
+const COMPOSITION_DOMAIN = 'devai:mutation-composition:v2.1';
+const SEMANTIC_RECEIPT_DOMAIN = 'devai:mutation-semantic-receipt:v2.1';
+const EVIDENCE_REF_DOMAIN = 'devai:mutation-evidence-ref:v2.1';
+const COMPOSITION_ENTRY_DOMAIN = 'devai:mutation-composition-entry:v2.1';
+const PACKAGE_RESULT_SET_DOMAIN = 'devai:mutation-package-result-set:v2.1';
+const OUTPUT_CONTRACT_DOMAIN = 'devai:mutation-output-contract:v2.1';
 const INPUT_BINDINGS = [
   'source',
   'tests',
@@ -60,11 +64,14 @@ function put(path, value) {
 }
 
 function framedDigest(domain, value) {
+  assert.equal(typeof domain, 'string');
+  assert.equal(domain.includes('\0'), false);
   const bytes = canonicalBytes(value);
   const length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length));
   return createHash('sha256')
     .update(Buffer.from(domain, 'utf8'))
+    .update(Buffer.from([0]))
     .update(length)
     .update(bytes)
     .digest('hex');
@@ -216,7 +223,7 @@ function evidencePackage({
     provenance: disposition === 'executed' ? 'fresh' : 'reused',
     origin,
   };
-  const evidenceRefDigest = sha256Hex(evidenceRef);
+  const evidenceRefDigest = framedDigest(EVIDENCE_REF_DOMAIN, evidenceRef);
   const entry = {
     packageName,
     workspace,
@@ -324,7 +331,7 @@ function mutationV21Fixture({ dispositions = ['executed', 'reused', 'not-require
         reportDigest: item.entry.reportDigest,
         resultDigest: item.entry.resultDigest,
       });
-      item.entry.evidenceRefDigest = sha256Hex(item.entry.evidenceRef);
+      item.entry.evidenceRefDigest = framedDigest(EVIDENCE_REF_DOMAIN, item.entry.evidenceRef);
     }
     const evidenceEntries = state.packages.filter(
       (entry) => entry.contract.requirement === 'required',
@@ -388,7 +395,7 @@ function mutationV21Fixture({ dispositions = ['executed', 'reused', 'not-require
       kind: 'mutation-semantic-verification-receipt-v2',
       receiptId: `MSV2-${'1'.repeat(16)}`,
       candidate: state.candidate,
-      outputContractDigest: sha256Hex(state.contract),
+      outputContractDigest: framedDigest(OUTPUT_CONTRACT_DOMAIN, state.contract),
       releasePlanReceiptDigest: state.contract.releasePlanReceiptDigest,
       releaseProfileDigest: state.contract.releaseProfileDigest,
       policyDigest: state.contract.policyDigest,
@@ -413,12 +420,20 @@ function mutationV21Fixture({ dispositions = ['executed', 'reused', 'not-require
         packageName: item.entry.packageName,
         disposition: item.entry.disposition,
         ...(item.contract.requirement === 'required' && { inputDigest: item.entry.inputDigest }),
-        compositionEntryDigest: sha256Hex(item.entry),
+        ...(item.contract.requirement === 'required' && {
+          reportDigest: item.entry.reportDigest,
+          resultDigest: item.entry.resultDigest,
+        }),
+        compositionEntryDigest: framedDigest(COMPOSITION_ENTRY_DOMAIN, item.entry),
       })),
-      packageResultSetDigest: sha256Hex(
+      packageResultSetDigest: framedDigest(
+        PACKAGE_RESULT_SET_DOMAIN,
         state.packages
           .filter((item) => item.contract.requirement === 'required')
-          .map((item) => item.entry.resultDigest),
+          .map((item) => ({
+            packageName: item.entry.packageName,
+            resultDigest: item.entry.resultDigest,
+          })),
       ),
       evidenceSetDigest: state.summary.aggregate.evidenceSetDigest,
       verdict,
@@ -560,10 +575,11 @@ describe('mutation report-set v2.1 immutable contract', () => {
     const rejected = mutationV21Fixture({ dispositions: ['executed'] });
     const rejectedItem = rejected.packages[0];
     rejectedItem.report = reportFor(rejectedItem.contract.packageName, rejectedItem.contract.thresholds, [
+      'Killed',
       'RuntimeError',
     ]);
-    rejectedItem.result.statusTotals = zeroTotals({ RuntimeError: 1 });
-    rejectedItem.result.targetCensus.totalMutants = 1;
+    rejectedItem.result.statusTotals = zeroTotals({ Killed: 1, RuntimeError: 1 });
+    rejectedItem.result.targetCensus.totalMutants = 2;
     rejectedItem.result.score = 100;
     rejectedItem.result.passed = false;
     Object.assign(rejectedItem.entry, {
