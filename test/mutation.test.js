@@ -246,7 +246,7 @@ function composedFixture() {
   return { artifactsDir, baseline, candidate, contract, packages, summary };
 }
 
-function composedV2Fixture({ packageCount = 4, freshCount = 2 } = {}) {
+function composedV2Fixture({ packageCount = 4, freshCount = 2, extension = 'json' } = {}) {
   const artifactsDir = mkdtempSync(join(tmpdir(), 'devai-mutation-v2-proof-'));
   temporaryDirectories.push(artifactsDir);
   const baseline = {
@@ -258,15 +258,16 @@ function composedV2Fixture({ packageCount = 4, freshCount = 2 } = {}) {
   const candidate = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
   const packageContracts = [];
   const packages = [];
-  const paths = ['mutation/summary.json'];
+  const summaryPath = `mutation/summary.${extension}`;
+  const paths = [summaryPath];
   let durationMs = 0;
   let freshDurationMs = 0;
   for (let index = 0; index < packageCount; index += 1) {
     const stem = `package-${String(index).padStart(2, '0')}`;
     const packageName = `@fixture/${stem}`;
     const workspace = `packages/${stem}`;
-    const resultPath = `mutation/${stem}.result.json`;
-    const reportPath = `mutation/${stem}.stryker.json`;
+    const resultPath = `mutation/${stem}.result.${extension}`;
+    const reportPath = `mutation/${stem}.stryker.${extension}`;
     const thresholds = { high: 100, low: 90, break: 90 };
     packageContracts.push({ packageName, workspace, resultPath, reportPath, thresholds });
     paths.push(resultPath, reportPath);
@@ -345,7 +346,7 @@ function composedV2Fixture({ packageCount = 4, freshCount = 2 } = {}) {
     kind: 'mutation-report-set-v2',
     schemaVersion: '2.0.0',
     expectedPackageCount: packageCount,
-    summaryPath: 'mutation/summary.json',
+    summaryPath,
     packages: packageContracts,
     paths,
   };
@@ -704,6 +705,32 @@ describe('mutation-report-set-v2 verification', () => {
     report.files['src/package-00.ts'].mutants[0].replacement = `gho_${'a'.repeat(36)}`;
     put(reportPath, report);
     expectCode('ARTIFACT_CREDENTIAL_MATERIAL', () => verifyV2(credential));
+  });
+
+  it('inspects every parsed v2 document regardless of the declared filename extension', () => {
+    const opaque = { packageCount: 1, freshCount: 1, extension: 'bin' };
+
+    const clean = composedV2Fixture(opaque);
+    assert.equal(verifyV2(clean).packageCount, 1);
+
+    const summary = composedV2Fixture(opaque);
+    summary.summary.baseline.summarySha256 = '/Volumes/Thiamat/stynx/mutation/summary.json';
+    summary.write();
+    expectCode('ARTIFACT_HOST_PATH', () => verifyV2(summary));
+
+    const report = composedV2Fixture(opaque);
+    const reportPath = join(report.artifactsDir, report.contract.packages[0].reportPath);
+    const document = JSON.parse(readFileSync(reportPath, 'utf8'));
+    document.files['src/package-00.ts'].mutants[0].replacement = `gho_${'a'.repeat(36)}`;
+    put(reportPath, document);
+    expectCode('ARTIFACT_CREDENTIAL_MATERIAL', () => verifyV2(report));
+
+    const result = composedV2Fixture(opaque);
+    const resultPath = join(result.artifactsDir, result.contract.packages[0].resultPath);
+    const packageResult = JSON.parse(readFileSync(resultPath, 'utf8'));
+    packageResult.toolVersions.stryker = '/var/folders/q7/9m0xk1_s0fs/T/stryker/9.6.1';
+    put(resultPath, packageResult);
+    expectCode('ARTIFACT_HOST_PATH', () => verifyV2(result));
   });
 
   it('recomputes package results, thresholds, and durations independently of the summary', () => {

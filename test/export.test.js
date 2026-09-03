@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import {
   existsSync,
@@ -10,13 +10,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { canonicalize, sha256Hex } from '../src/canonical.js';
 import { exportCandidateEvidence, preflightCandidateEvidence } from '../src/export.js';
 import { buildExpectedTaskPolicy } from '../src/policy-builder.js';
 import { loadAndVerify } from '../src/verify.js';
 
+const EXPORT_CLI = resolve(import.meta.dirname, '../src/export-cli.js');
 const temporaryDirectories = [];
 
 afterEach(() => {
@@ -333,12 +334,164 @@ function exportOptions(state) {
   };
 }
 
+/**
+ * A private key path that cannot be read at all. Any attempt to load, parse, derive
+ * from, or sign with it fails, so a preflight that succeeds against this sentinel
+ * proves the private key was never accessed.
+ */
+function absentPrivateKey(state) {
+  return join(state.root, 'never-created-private.pem');
+}
+
+/**
+ * A private key file that exists but holds no key. Reaching the signing step with it
+ * throws, so the code a failing export reports tells us whether verification ran first.
+ */
+function invalidPrivateKey(state) {
+  const path = join(state.root, 'invalid-private.pem');
+  put(path, 'not a private key\n');
+  return path;
+}
+
 describe('trusted candidate evidence export', () => {
   it('validates the complete export chain without writing an evidence bundle', () => {
     const state = fixture({ portable: true });
     const result = preflightCandidateEvidence(exportOptions(state));
     assert.equal(result.artifactPaths.length, 1);
     assert.equal(existsSync(state.outputDir), false);
+  });
+
+  it('runs the full verification semantics in preflight without touching the private key', () => {
+    for (const privateKeyPath of [absentPrivateKey, invalidPrivateKey]) {
+      const state = fixture({ mutation: true });
+      const options = { ...exportOptions(state), privateKeyPath: privateKeyPath(state) };
+      const preflight = preflightCandidateEvidence(options);
+
+      assert.equal(preflight.verified.ok, true);
+      assert.deepEqual(preflight.verified.verifiedNodes, ['test:one']);
+      // Preflight verifies receipt semantics without manufacturing or authenticating a
+      // signature, so it must not claim that the configured signer was verified.
+      assert.equal(Object.hasOwn(preflight.verified, 'signerId'), false);
+      assert.deepEqual(preflight.verified.verifiedArtifacts, preflight.artifactPaths);
+      assert.deepEqual(preflight.verified.verifiedMutation, [
+        {
+          nodeId: 'test:one',
+          packageCount: 1,
+          score: 100,
+          statusTotals: state.mutationSet.statusTotals,
+          evidenceSetDigest: state.mutationSet.summary.aggregate.evidenceSetDigest,
+        },
+      ]);
+      assert.equal(existsSync(state.outputDir), false);
+
+      // The very same options fail as soon as the export path reaches the key, which
+      // is what makes the successful preflight above evidence of non-access.
+      assert.throws(() => exportCandidateEvidence(options));
+      assert.equal(existsSync(state.outputDir), false);
+    }
+
+    const missing = fixture();
+    expectCode('INPUT_MISSING', () =>
+      exportCandidateEvidence({
+        ...exportOptions(missing),
+        privateKeyPath: absentPrivateKey(missing),
+      }),
+    );
+  });
+
+  it('preflights the omitted private key the export CLI leaves out entirely', () => {
+    const state = fixture({ portable: true });
+    const options = { ...exportOptions(state), privateKeyPath: undefined };
+    assert.equal(preflightCandidateEvidence(options).verified.ok, true);
+    assert.equal(existsSync(state.outputDir), false);
+    expectCode('SCHEMA_INVALID', () => exportCandidateEvidence(options));
+    assert.equal(existsSync(state.outputDir), false);
+  });
+
+  it('runs CLI preflight with signing and private-key crypto operations disabled', () => {
+    const state = fixture({ mutation: true });
+    const tripwire = join(state.root, 'crypto-tripwire.cjs');
+    put(
+      tripwire,
+      [
+        "const crypto = require('node:crypto');",
+        "const { syncBuiltinESMExports } = require('node:module');",
+        "for (const name of ['createPrivateKey', 'generateKeyPairSync', 'sign']) {",
+        "  crypto[name] = () => { throw new Error(`FORBIDDEN_CRYPTO_OPERATION:${name}`); };",
+        '}',
+        'syncBuiltinESMExports();',
+        '',
+      ].join('\n'),
+    );
+    const common = [
+      '--repo',
+      state.repo,
+      '--receipt',
+      state.receiptPath,
+      '--results-dir',
+      state.resultsDir,
+      '--profile',
+      'rc',
+      '--commit',
+      state.commit,
+      '--tree',
+      state.tree,
+      '--toolchain',
+      state.toolchain,
+      '--environment',
+      state.environment,
+      '--public-key',
+      state.publicKeyPath,
+      '--signer-id',
+      'local-rc-signer',
+      '--output-dir',
+      state.outputDir,
+    ];
+    const preflight = spawnSync(
+      process.execPath,
+      ['--require', tripwire, EXPORT_CLI, ...common, '--preflight', 'true'],
+      { encoding: 'utf8' },
+    );
+    assert.equal(preflight.status, 0, preflight.stderr);
+    assert.equal(JSON.parse(preflight.stdout).preflight, true);
+    assert.equal(existsSync(state.outputDir), false);
+
+    const signing = spawnSync(
+      process.execPath,
+      ['--require', tripwire, EXPORT_CLI, ...common, '--private-key', state.privateKeyPath],
+      { encoding: 'utf8' },
+    );
+    assert.equal(signing.status, 70);
+    assert.match(JSON.parse(signing.stderr).message, /FORBIDDEN_CRYPTO_OPERATION/u);
+    assert.equal(existsSync(state.outputDir), false);
+  });
+
+  it('rejects stale result digests and malformed v2 evidence before any signing', () => {
+    const stale = fixture({ portable: true });
+    const receipt = JSON.parse(readFileSync(stale.receiptPath, 'utf8'));
+    const resultPath = join(stale.resultsDir, `${receipt.tasks[0].resultDigest}.json`);
+    const taskResult = JSON.parse(readFileSync(resultPath, 'utf8'));
+    taskResult.finishedAt = '2026-08-10T00:00:09.000Z';
+    put(resultPath, canonicalize(taskResult));
+    expectCode('RESULT_DIGEST_MISMATCH', () =>
+      exportCandidateEvidence({
+        ...exportOptions(stale),
+        privateKeyPath: absentPrivateKey(stale),
+      }),
+    );
+    assert.equal(existsSync(stale.outputDir), false);
+
+    const malformed = fixture({
+      mutation: true,
+      patchMutationSummary: (summary) => delete summary.aggregate.reusedDurationMs,
+    });
+    expectCode('MUTATION_SUMMARY_MISMATCH', () =>
+      exportCandidateEvidence({
+        ...exportOptions(malformed),
+        privateKeyPath: absentPrivateKey(malformed),
+      }),
+    );
+    assert.equal(existsSync(malformed.outputDir), false);
   });
 
   it('fails a missing output parent with a stable preflight code before signing or execution', () => {

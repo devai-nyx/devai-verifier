@@ -16,13 +16,18 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { artifactMediaType, validateArtifactContent } from './artifact-safety.js';
 import {
   VerificationError,
+  assertString,
   canonicalBytes,
   canonicalize,
   readJson,
   sha256Hex,
 } from './canonical.js';
 import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
-import { PAYLOAD_TYPE, verifyCandidateEvidence } from './verify.js';
+import {
+  PAYLOAD_TYPE,
+  verifyCandidateEvidence,
+  verifyCandidateReceiptEvidence,
+} from './verify.js';
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -85,8 +90,14 @@ function outputDestination(repo, path) {
 }
 
 function controlledInput(repo, path, label) {
+  assertString(path, `${label} path`);
   const absolute = outsideRepository(repo, path, label);
-  const stat = lstatSync(absolute);
+  let stat;
+  try {
+    stat = lstatSync(absolute);
+  } catch {
+    throw new VerificationError('INPUT_MISSING', `${label} is unavailable`);
+  }
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new VerificationError(
       'TRUST_BOUNDARY_INVALID',
@@ -182,22 +193,70 @@ function declaredArtifactPaths(taskPolicy) {
   return [...paths].sort();
 }
 
-export function preflightCandidateEvidence(options) {
-  let repository;
+function candidateArtifactPath(repository, path) {
+  let cursor = repository;
+  let stat;
+  for (const segment of path.split('/')) {
+    cursor = join(cursor, segment);
+    try {
+      stat = lstatSync(cursor);
+    } catch {
+      throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unavailable`);
+    }
+    if (stat.isSymbolicLink()) {
+      throw new VerificationError(
+        'ARTIFACT_SYMLINK',
+        `artifact ${path} traverses a symbolic link`,
+      );
+    }
+  }
+  if (!stat.isFile()) {
+    throw new VerificationError(
+      'ARTIFACT_INVALID',
+      `artifact ${path} must be a regular non-symlink file`,
+    );
+  }
+  return cursor;
+}
+
+/**
+ * Copies the declared schema 1.1 artifacts out of the candidate working tree into a
+ * bundle laid out exactly as an exported one, refusing any path segment that
+ * traverses a symbolic link out of the candidate.
+ */
+function stageArtifacts(repository, artifactPaths, artifactsDir) {
+  mkdirSync(artifactsDir, { recursive: true });
+  for (const path of artifactPaths) {
+    copyRegularFile(
+      candidateArtifactPath(repository, path),
+      join(artifactsDir, path),
+      `artifact ${path}`,
+    );
+  }
+}
+
+function candidateRepository(repo) {
   try {
-    repository = realpathSync(options.repo);
+    return realpathSync(repo);
   } catch {
     throw new VerificationError('REPOSITORY_INVALID', 'candidate repository is unreadable');
   }
+}
+
+export function preflightCandidateEvidence(options) {
+  const repository = candidateRepository(options.repo);
   exactCandidate(repository, options.commit, options.tree);
   validateSignerId(options.signerId);
+  assertString(options.resultsDir, 'task results directory');
   const controlledToolchain = controlledInput(repository, options.toolchainPath, 'toolchain input');
   const controlledEnvironment = controlledInput(
     repository,
     options.environmentPath,
     'environment input',
   );
-  const controlledPrivateKey = controlledInput(repository, options.privateKeyPath, 'private key');
+  // The private key is deliberately absent from preflight. Only the public key and the
+  // signer ID keep their trust-boundary checks here, so a preflight is a genuinely
+  // non-signing operation that runs against a key the operator has not unlocked.
   const controlledPublicKey = controlledInput(repository, options.publicKeyPath, 'public key');
   const output = outputDestination(repository, options.outputDir);
   const descriptor = readCommittedDescriptor(repository, options.commit);
@@ -213,15 +272,66 @@ export function preflightCandidateEvidence(options) {
     environment: readEnvironmentMap(controlledEnvironment, 'environment'),
     policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
   });
-  const payload = canonicalBytes(receipt);
+  const artifactPaths = declaredArtifactPaths(built.taskPolicy);
+  for (const path of artifactPaths) {
+    const absolute = candidateArtifactPath(repository, path);
+    validateArtifactContent({
+      bytes: readFileSync(absolute),
+      path,
+      mediaType: artifactMediaType(path),
+    });
+  }
+  // The candidate repository contains many non-artifact files, so the shared
+  // semantic kernel verifies every declared artifact in place while deferring the
+  // exact standalone-bundle population check to the normal export verification.
+  // No preflight scratch directory or output is created.
+  const verified = verifyCandidateReceiptEvidence({
+    receipt,
+    resultsDir: options.resultsDir,
+    artifactsDir: repository,
+    taskPolicy: built.taskPolicy,
+    expectedRepository: descriptor.repositoryId,
+    expectedCommit: options.commit,
+    expectedTree: options.tree,
+    expectedPolicyDigest: built.taskPolicyDigest,
+    allowAdditionalArtifactFiles: true,
+  });
+  return {
+    repository,
+    output,
+    descriptor,
+    receipt,
+    built,
+    artifactPaths,
+    controlledPublicKey,
+    verified,
+  };
+}
+
+export function exportCandidateEvidence(options) {
+  // The signing key's trust boundary is asserted from its location alone, before any
+  // other work: a candidate that supplies its own key is refused up front, and this
+  // check neither opens nor reads the key file.
+  assertString(options.privateKeyPath, 'private key path');
+  outsideRepository(candidateRepository(options.repo), options.privateKeyPath, 'private key');
+
+  const { repository, output, descriptor, receipt, built, artifactPaths, controlledPublicKey } =
+    preflightCandidateEvidence(options);
+  const { resultsDir, signerId, commit, tree, profile } = options;
+
+  // Signing starts only once the non-signing preflight above has fully verified this
+  // candidate, so the protected key is never applied to evidence that has not already
+  // passed the same checks an independent verifier will apply to the exported bundle.
+  const controlledPrivateKey = controlledInput(repository, options.privateKeyPath, 'private key');
   const keys = matchingKeyPair(controlledPrivateKey, controlledPublicKey);
+  const payload = canonicalBytes(receipt);
   const envelope = {
     schemaVersion: '1.0.0',
     payloadType: PAYLOAD_TYPE,
     payload: payload.toString('base64'),
     signatures: [
       {
-        signerId: options.signerId,
+        signerId,
         signature: sign(null, payload, keys.privateKey).toString('base64'),
       },
     ],
@@ -230,49 +340,12 @@ export function preflightCandidateEvidence(options) {
     schemaVersion: '1.0.0',
     trustedSigners: [
       {
-        signerId: options.signerId,
+        signerId,
         publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       },
     ],
     revokedSignerIds: [],
   };
-  const artifactPaths = declaredArtifactPaths(built.taskPolicy);
-  for (const path of artifactPaths) {
-    const absolute = join(repository, path);
-    let stat;
-    try {
-      stat = lstatSync(absolute);
-    } catch {
-      throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unavailable`);
-    }
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new VerificationError(
-        'ARTIFACT_INVALID',
-        `artifact ${path} must be a regular non-symlink file`,
-      );
-    }
-    validateArtifactContent({
-      bytes: readFileSync(absolute),
-      path,
-      mediaType: artifactMediaType(path),
-    });
-  }
-  return {
-    repository,
-    output,
-    descriptor,
-    receipt,
-    built,
-    envelope,
-    trustStore,
-    artifactPaths,
-  };
-}
-
-export function exportCandidateEvidence(options) {
-  const { repository, output, descriptor, receipt, built, envelope, trustStore } =
-    preflightCandidateEvidence(options);
-  const { resultsDir, signerId, commit, tree, profile } = options;
 
   const staging = mkdtempSync(join(dirname(output), '.devai-evidence-export-'));
   try {
@@ -294,22 +367,7 @@ export function exportCandidateEvidence(options) {
         `task result ${task.nodeId}`,
       );
     }
-    const artifactPaths = declaredArtifactPaths(built.taskPolicy);
-    for (const path of artifactPaths) {
-      const segments = path.split('/');
-      let cursor = repository;
-      for (const segment of segments) {
-        cursor = join(cursor, segment);
-        const stat = lstatSync(cursor);
-        if (stat.isSymbolicLink()) {
-          throw new VerificationError(
-            'ARTIFACT_SYMLINK',
-            `artifact ${path} traverses a symbolic link`,
-          );
-        }
-      }
-      copyRegularFile(cursor, join(staging, 'artifacts', path), `artifact ${path}`);
-    }
+    stageArtifacts(repository, artifactPaths, join(staging, 'artifacts'));
     const verified = verifyCandidateEvidence({
       envelope,
       resultsDir: join(staging, 'results'),

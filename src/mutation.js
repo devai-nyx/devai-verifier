@@ -324,6 +324,11 @@ function validateSuccessfulProcess(value, label) {
  * `mutation-report-set-v2` always supply it so that standalone mutation
  * verification rejects credential material and workstation paths on its own,
  * without depending on an enclosing bundle walk.
+ *
+ * The inspection media type is pinned to `application/json` rather than inferred
+ * from the declared filename: a v2 contract may declare any portable path, so an
+ * extension such as `.bin` would otherwise be treated as opaque and skip the
+ * safety scan over a document this function has already parsed as JSON.
  */
 function readCanonicalJson(path, label, inspectPath) {
   let text;
@@ -338,7 +343,11 @@ function readCanonicalJson(path, label, inspectPath) {
     );
   }
   if (inspectPath !== undefined) {
-    validateArtifactContent({ bytes: Buffer.from(text, 'utf8'), path: inspectPath });
+    validateArtifactContent({
+      bytes: Buffer.from(text, 'utf8'),
+      path: inspectPath,
+      mediaType: 'application/json',
+    });
   }
   if (text !== canonicalize(value) && text !== `${canonicalize(value)}\n`) {
     throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);

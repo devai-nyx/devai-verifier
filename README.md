@@ -150,6 +150,12 @@ node src/export-cli.js \
   --output-dir /protected/evidence/<exact-commit>
 ```
 
+Adding `--preflight true` runs the complete unsigned receipt, task-result,
+artifact, and mutation-semantic verification without creating an output or
+performing any signing, key generation, or private-key operation. In preflight
+mode `--private-key` is not required; normal export continues to require it and
+performs the sole signing operation only after preflight succeeds.
+
 Affected-mode export additionally requires `--base <exact-ancestor-commit>`.
 The output directory is created atomically. Legacy schema 1.0 bundles contain
 `envelope.json`, `task-policy.json`, `trust-store.json`, `manifest.json`, and the

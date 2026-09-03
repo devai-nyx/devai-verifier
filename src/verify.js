@@ -27,7 +27,15 @@ const PORTABLE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)(?!.*\0)[^/]+(?:
 function validateOutputContract(contract, label) {
   assertObject(contract, label);
   canonicalBytes(contract);
-  if (contract.paths === undefined) return;
+  if (contract.paths === undefined) {
+    // A mutation report set declares its own artifact roster, so a pathless one is
+    // never a legitimately artifact-free contract: validate it here rather than
+    // letting the generic no-paths return skip every mutation check below.
+    if (mutationContractVersion(contract.kind, label) !== undefined) {
+      validateMutationContract(contract, label);
+    }
+    return;
+  }
   assertUniqueStrings(contract.paths, `${label}.paths`);
   if (contract.paths.length === 0) {
     throw new VerificationError('SCHEMA_INVALID', `${label}.paths must be nonempty when present`);
@@ -239,7 +247,13 @@ function filesBelow(root, current = root) {
   return files;
 }
 
-function verifyArtifacts(policy, results, artifactsDir, candidate) {
+function verifyArtifacts(
+  policy,
+  results,
+  artifactsDir,
+  candidate,
+  allowAdditionalArtifactFiles = false,
+) {
   const expectedPaths = artifactPaths(policy);
   if (expectedPaths.length === 0) return { paths: [], mutation: [] };
   if (typeof artifactsDir !== 'string') {
@@ -248,24 +262,26 @@ function verifyArtifacts(policy, results, artifactsDir, candidate) {
       'schema 1.1 output artifacts directory is required',
     );
   }
-  let actualPaths;
-  try {
-    actualPaths = filesBelow(resolve(artifactsDir)).sort();
-  } catch (error) {
-    if (error instanceof VerificationError) throw error;
-    throw new VerificationError(
-      'ARTIFACTS_MISSING',
-      `artifact directory is unreadable: ${error.message}`,
-    );
-  }
-  if (
-    actualPaths.length !== expectedPaths.length ||
-    actualPaths.some((path, index) => path !== expectedPaths[index])
-  ) {
-    throw new VerificationError(
-      'ARTIFACT_POPULATION_MISMATCH',
-      'artifact population differs from policy',
-    );
+  if (!allowAdditionalArtifactFiles) {
+    let actualPaths;
+    try {
+      actualPaths = filesBelow(resolve(artifactsDir)).sort();
+    } catch (error) {
+      if (error instanceof VerificationError) throw error;
+      throw new VerificationError(
+        'ARTIFACTS_MISSING',
+        `artifact directory is unreadable: ${error.message}`,
+      );
+    }
+    if (
+      actualPaths.length !== expectedPaths.length ||
+      actualPaths.some((path, index) => path !== expectedPaths[index])
+    ) {
+      throw new VerificationError(
+        'ARTIFACT_POPULATION_MISMATCH',
+        'artifact population differs from policy',
+      );
+    }
   }
   const policyById = new Map(policy.requiredNodes.map((node) => [node.nodeId, node]));
   for (const [nodeId, result] of results) {
@@ -325,21 +341,17 @@ function verifyArtifacts(policy, results, artifactsDir, candidate) {
   return { paths: expectedPaths, mutation };
 }
 
-export function verifyCandidateEvidence({
-  envelope,
+function validateVerificationContext({
   resultsDir,
   taskPolicy,
-  trustStore,
   expectedRepository,
   expectedCommit,
   expectedTree,
   expectedPolicyDigest,
   bindingMode = 'exact-commit',
-  artifactsDir,
 }) {
   validateTaskPolicy(taskPolicy);
-  validateTrustStore(trustStore);
-  validateEnvelope(envelope);
+  assertString(resultsDir, 'task results directory');
   assertString(expectedRepository, 'expected repository', IDENTIFIER);
   assertString(expectedCommit, 'expected commit', GIT_OBJECT);
   assertString(expectedTree, 'expected tree', GIT_OBJECT);
@@ -361,44 +373,22 @@ export function verifyCandidateEvidence({
   if (taskPolicy.repositoryId !== expectedRepository) {
     throw new VerificationError('REPOSITORY_MISMATCH', 'task policy belongs to another repository');
   }
+}
 
-  const signature = envelope.signatures[0];
-  if (trustStore.revokedSignerIds.includes(signature.signerId)) {
-    throw new VerificationError('SIGNER_REVOKED', `signer ${signature.signerId} is revoked`);
-  }
-  const signer = trustStore.trustedSigners.find((entry) => entry.signerId === signature.signerId);
-  if (signer === undefined) {
-    throw new VerificationError('SIGNER_UNTRUSTED', `signer ${signature.signerId} is not trusted`);
-  }
-
-  const payloadBytes = Buffer.from(envelope.payload, 'base64');
-  if (
-    !verifySignature(
-      null,
-      payloadBytes,
-      createPublicKey(signer.publicKeyPem),
-      Buffer.from(signature.signature, 'base64'),
-    )
-  ) {
-    throw new VerificationError('SIGNATURE_INVALID', 'candidate receipt signature is invalid');
-  }
-
-  let receipt;
-  try {
-    receipt = JSON.parse(payloadBytes.toString('utf8'));
-  } catch (error) {
-    throw new VerificationError(
-      'MALFORMED_JSON',
-      `candidate receipt payload is invalid: ${error.message}`,
-    );
-  }
+function verifyValidatedCandidateReceipt({
+  receipt,
+  resultsDir,
+  taskPolicy,
+  expectedRepository,
+  expectedCommit,
+  expectedTree,
+  expectedPolicyDigest,
+  bindingMode,
+  artifactsDir,
+  signerId,
+  allowAdditionalArtifactFiles = false,
+}) {
   validateReceipt(receipt);
-  if (!payloadBytes.equals(canonicalBytes(receipt))) {
-    throw new VerificationError(
-      'NON_CANONICAL_JSON',
-      'candidate receipt payload is not canonical JSON',
-    );
-  }
   if (receipt.repository.id !== expectedRepository) {
     throw new VerificationError(
       'REPOSITORY_MISMATCH',
@@ -477,10 +467,16 @@ export function verifyCandidateEvidence({
     }
   }
 
-  const verifiedArtifactSet = verifyArtifacts(taskPolicy, results, artifactsDir, {
-    candidateCommit: receipt.repository.commit,
-    candidateTree: receipt.repository.tree,
-  });
+  const verifiedArtifactSet = verifyArtifacts(
+    taskPolicy,
+    results,
+    artifactsDir,
+    {
+      candidateCommit: receipt.repository.commit,
+      candidateTree: receipt.repository.tree,
+    },
+    allowAdditionalArtifactFiles,
+  );
 
   return {
     ok: true,
@@ -490,12 +486,114 @@ export function verifyCandidateEvidence({
     tree: expectedTree,
     binding: bindingMode,
     profile: receipt.profile,
-    signerId: signature.signerId,
+    ...(signerId !== undefined && { signerId }),
     policyDigest: expectedPolicyDigest,
     verifiedNodes: expectedIds,
     verifiedArtifacts: verifiedArtifactSet.paths,
     verifiedMutation: verifiedArtifactSet.mutation,
   };
+}
+
+/**
+ * Verifies an already-decoded candidate receipt and all referenced result/artifact
+ * semantics without performing envelope authentication or any signing operation.
+ * Callers must keep this distinct from trusted signed-envelope verification.
+ */
+export function verifyCandidateReceiptEvidence({
+  receipt,
+  resultsDir,
+  taskPolicy,
+  expectedRepository,
+  expectedCommit,
+  expectedTree,
+  expectedPolicyDigest,
+  bindingMode = 'exact-commit',
+  artifactsDir,
+  allowAdditionalArtifactFiles = false,
+}) {
+  const context = {
+    resultsDir,
+    taskPolicy,
+    expectedRepository,
+    expectedCommit,
+    expectedTree,
+    expectedPolicyDigest,
+    bindingMode,
+    artifactsDir,
+    allowAdditionalArtifactFiles,
+  };
+  validateVerificationContext(context);
+  return verifyValidatedCandidateReceipt({ ...context, receipt });
+}
+
+export function verifyCandidateEvidence({
+  envelope,
+  resultsDir,
+  taskPolicy,
+  trustStore,
+  expectedRepository,
+  expectedCommit,
+  expectedTree,
+  expectedPolicyDigest,
+  bindingMode = 'exact-commit',
+  artifactsDir,
+}) {
+  const context = {
+    resultsDir,
+    taskPolicy,
+    expectedRepository,
+    expectedCommit,
+    expectedTree,
+    expectedPolicyDigest,
+    bindingMode,
+    artifactsDir,
+  };
+  validateVerificationContext(context);
+  validateTrustStore(trustStore);
+  validateEnvelope(envelope);
+
+  const signature = envelope.signatures[0];
+  if (trustStore.revokedSignerIds.includes(signature.signerId)) {
+    throw new VerificationError('SIGNER_REVOKED', `signer ${signature.signerId} is revoked`);
+  }
+  const signer = trustStore.trustedSigners.find((entry) => entry.signerId === signature.signerId);
+  if (signer === undefined) {
+    throw new VerificationError('SIGNER_UNTRUSTED', `signer ${signature.signerId} is not trusted`);
+  }
+
+  const payloadBytes = Buffer.from(envelope.payload, 'base64');
+  if (
+    !verifySignature(
+      null,
+      payloadBytes,
+      createPublicKey(signer.publicKeyPem),
+      Buffer.from(signature.signature, 'base64'),
+    )
+  ) {
+    throw new VerificationError('SIGNATURE_INVALID', 'candidate receipt signature is invalid');
+  }
+
+  let receipt;
+  try {
+    receipt = JSON.parse(payloadBytes.toString('utf8'));
+  } catch (error) {
+    throw new VerificationError(
+      'MALFORMED_JSON',
+      `candidate receipt payload is invalid: ${error.message}`,
+    );
+  }
+  validateReceipt(receipt);
+  if (!payloadBytes.equals(canonicalBytes(receipt))) {
+    throw new VerificationError(
+      'NON_CANONICAL_JSON',
+      'candidate receipt payload is not canonical JSON',
+    );
+  }
+  return verifyValidatedCandidateReceipt({
+    ...context,
+    receipt,
+    signerId: signature.signerId,
+  });
 }
 
 export function loadAndVerify(options) {
