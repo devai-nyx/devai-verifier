@@ -3,7 +3,20 @@ import { VerificationError } from './canonical.js';
 import { publishCandidateEvidence } from './publish.js';
 
 const required = new Set(['repo', 'bundle', 'trust']);
-const optional = new Set(['default-branch', 'remote', 'tag-prefix', 'workflow']);
+const optional = new Set([
+  'default-branch',
+  'remote',
+  'tag-prefix',
+  'workflow',
+  'repository',
+  'commit',
+  'tree',
+  'policy-digest',
+  'signer-id',
+  'trust-root-id',
+  'trust-store-digest',
+  'key-id',
+]);
 
 function parse(argv) {
   const values = {};
@@ -32,6 +45,14 @@ try {
     repo: values.repo,
     bundleDir: values.bundle,
     trustStorePath: values.trust,
+    expectedRepository: values.repository,
+    expectedCommit: values.commit,
+    expectedTree: values.tree,
+    expectedPolicyDigest: values['policy-digest'],
+    expectedSignerId: values['signer-id'],
+    expectedTrustRootId: values['trust-root-id'],
+    expectedTrustStoreDigest: values['trust-store-digest'],
+    expectedKeyId: values['key-id'],
     remote: values.remote,
     tagPrefix: values['tag-prefix'],
     workflow: values.workflow,

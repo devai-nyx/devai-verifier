@@ -3,7 +3,13 @@ import { VerificationError } from './canonical.js';
 import { verifyPreparedBundle } from './publish.js';
 
 const required = new Set(['bundle', 'trust', 'repository', 'commit', 'tree', 'policy-digest']);
-const optional = new Set(['binding']);
+const optional = new Set([
+  'binding',
+  'signer-id',
+  'trust-root-id',
+  'trust-store-digest',
+  'key-id',
+]);
 
 function parse(argv) {
   const values = {};
@@ -35,6 +41,10 @@ try {
     expectedCommit: values.commit,
     expectedTree: values.tree,
     expectedPolicyDigest: values['policy-digest'],
+    expectedSignerId: values['signer-id'],
+    expectedTrustRootId: values['trust-root-id'],
+    expectedTrustStoreDigest: values['trust-store-digest'],
+    expectedKeyId: values['key-id'],
     bindingMode: values.binding ?? 'exact-commit',
   });
   process.stdout.write(`${JSON.stringify({ ...result.verified, manifest: result.manifest })}\n`);

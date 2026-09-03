@@ -1,5 +1,14 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -364,6 +373,211 @@ function composedEvidenceFixture() {
   return state;
 }
 
+/**
+ * Builds signed schema 1.1 evidence for a single all-fresh `mutation-report-set-v2`
+ * package. `extension` renames every declared mutation artifact so the same canonical
+ * JSON documents can be verified under a filename an extension-based media-type guess
+ * would treat as opaque.
+ */
+function signedMutationV2Fixture({ extension = 'json', replacement, summarySha256 } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'devai-mutation-v2-verifier-'));
+  temporaryDirectories.push(root);
+  const resultsDir = join(root, 'results');
+  const artifactsDir = join(root, 'artifacts');
+  mkdirSync(resultsDir);
+  const approved = keyPair();
+  const taskKey = sha256Hex(Buffer.from('task:mutation-v2'));
+  const packageName = '@fixture/package-0';
+  const workspace = 'packages/package-0';
+  const thresholds = { break: 90, high: 100, low: 90 };
+  const summaryPath = `mutation/summary.${extension}`;
+  const reportPath = `mutation/package-0.stryker.${extension}`;
+  const resultPath = `mutation/package-0.result.${extension}`;
+  const statusTotals = {
+    CompileError: 0,
+    Ignored: 0,
+    Killed: 1,
+    NoCoverage: 0,
+    Pending: 0,
+    RuntimeError: 0,
+    Survived: 0,
+    Timeout: 0,
+  };
+  const process = { errorAbsent: true, signal: null, status: 0 };
+  const report = {
+    schemaVersion: '1',
+    projectRoot: '.',
+    thresholds,
+    files: {
+      'src/package-0.ts': {
+        language: 'typescript',
+        mutants: [{ id: '0', status: 'Killed', ...(replacement !== undefined && { replacement }) }],
+      },
+    },
+    testFiles: {},
+    config: {},
+    framework: { name: 'StrykerJS', branding: {} },
+  };
+  const reportDigest = sha256Hex(Buffer.from(canonicalize(report)));
+  const packageResult = {
+    schemaVersion: '1.0.0',
+    kind: 'mutation-package-result-v1',
+    packageName,
+    workspace,
+    passed: true,
+    durationMs: 5,
+    toolVersions: { stryker: '9.6.1' },
+    thresholds,
+    score: 100,
+    statusTotals,
+    reportDigest,
+    process,
+  };
+  const resultDigest = sha256Hex(Buffer.from(canonicalize(packageResult)));
+  const evidenceRef = {
+    baselineCommit: null,
+    baselineTree: null,
+    inputProjectionDigest: sha256Hex(Buffer.from(`input:${packageName}`)),
+    kind: 'mutation-package-evidence-ref-v2',
+    packageName,
+    provenance: 'fresh',
+    reportDigest,
+    reportPath,
+    resultDigest,
+    resultPath,
+    workspace,
+  };
+  const evidenceRefDigest = sha256Hex(evidenceRef);
+  const summary = {
+    schemaVersion: '2.0.0',
+    kind: 'mutation-composed-report-set-v2',
+    candidate: { commit: COMMIT, tree: TREE },
+    baseline: {
+      commit: 'c'.repeat(40),
+      tree: 'd'.repeat(40),
+      summaryBytes: 512,
+      summarySha256: summarySha256 ?? 'e'.repeat(64),
+    },
+    semanticRebindComparison: {
+      kind: 'root-manifest-unchanged-with-historical-input-v1',
+      allowedScriptTransitions: [],
+      canonicalContractBytes: 128,
+      canonicalContractSha256: 'f'.repeat(64),
+      comparison: {
+        historicalMutationInputTreeEntries: 'match-explicit-historical-candidate-mode-type-oid',
+        otherMutationInputTreeEntries: 'identical-mode-type-oid',
+        rootManifest: 'source-and-target-identical',
+      },
+      sourceRootManifest: { bytes: 100, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+      targetRootManifest: { bytes: 100, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+    },
+    complete: true,
+    passed: true,
+    packages: [
+      {
+        baselineCommit: null,
+        baselineTree: null,
+        durationMs: 5,
+        evidenceRef,
+        evidenceRefDigest,
+        inputProjectionDigest: evidenceRef.inputProjectionDigest,
+        packageName,
+        passed: true,
+        process,
+        provenance: 'fresh',
+        reportDigest,
+        reportPath,
+        resultDigest,
+        resultPath,
+        score: 100,
+        statusTotals,
+        targetCensus: { targetFileCount: 1, totalMutants: 1 },
+        thresholds,
+        workspace,
+      },
+    ],
+    aggregate: {
+      packageCount: 1,
+      freshPackageCount: 1,
+      reusedPackageCount: 0,
+      durationMs: 5,
+      freshDurationMs: 5,
+      reusedDurationMs: 0,
+      score: 100,
+      statusTotals,
+      evidenceSetDigest: sha256Hex([evidenceRefDigest]),
+    },
+  };
+  const outputDigests = {
+    stderr: sha256Hex(Buffer.from('stderr')),
+    stdout: sha256Hex(Buffer.from('stdout')),
+  };
+  for (const [path, value] of [
+    [reportPath, report],
+    [resultPath, packageResult],
+    [summaryPath, summary],
+  ]) {
+    const bytes = Buffer.from(`${canonicalize(value)}\n`);
+    mkdirSync(dirname(join(artifactsDir, path)), { recursive: true });
+    writeFileSync(join(artifactsDir, path), bytes);
+    outputDigests[path] = sha256Hex(bytes);
+  }
+  const taskResult = result('test:mutation', taskKey);
+  taskResult.outputDigests = outputDigests;
+  const taskResultDigest = sha256Hex(taskResult);
+  writeFileSync(join(resultsDir, `${taskResultDigest}.json`), JSON.stringify(taskResult));
+  const taskPolicy = {
+    schemaVersion: '1.1.0',
+    repositoryId: 'devaii',
+    requiredNodes: [
+      {
+        nodeId: 'test:mutation',
+        taskKey,
+        dependencies: [],
+        outputContract: {
+          kind: 'mutation-report-set-v2',
+          schemaVersion: '2.0.0',
+          expectedPackageCount: 1,
+          summaryPath,
+          packages: [{ packageName, workspace, reportPath, resultPath, thresholds }],
+          paths: [summaryPath, resultPath, reportPath],
+        },
+      },
+    ],
+  };
+  const policyDigest = sha256Hex(taskPolicy);
+  const receipt = {
+    schemaVersion: '1.1.0',
+    repository: { id: 'devaii', commit: COMMIT, tree: TREE },
+    profile: 'rc',
+    taskPolicyDigest: policyDigest,
+    createdAt: NOW,
+    tasks: [{ nodeId: 'test:mutation', taskKey, resultDigest: taskResultDigest }],
+  };
+  return {
+    root,
+    resultsDir,
+    artifactsDir,
+    approved,
+    taskPolicy,
+    policyDigest,
+    receipt,
+    statusTotals,
+    evidenceSetDigest: summary.aggregate.evidenceSetDigest,
+    trustStore: {
+      schemaVersion: '1.0.0',
+      trustedSigners: [
+        {
+          signerId: 'owner-workstation',
+          publicKeyPem: approved.publicKey.export({ type: 'spki', format: 'pem' }),
+        },
+      ],
+      revokedSignerIds: [],
+    },
+    envelope: signedEnvelope(receipt, approved.privateKey),
+  };
+}
+
 describe('candidate-independent evidence verification', () => {
   it('accepts an exact canonical receipt with complete current PASS results', () => {
     const state = fixture();
@@ -451,6 +665,43 @@ describe('candidate-independent evidence verification', () => {
     expectCode('SCHEMA_INVALID', () => verify(state));
   });
 
+  it('rejects a signed mutation output contract that declares no artifact paths', () => {
+    function signedPolicy(outputContract) {
+      const state = fixture();
+      state.taskPolicy.schemaVersion = '1.1.0';
+      for (const node of state.taskPolicy.requiredNodes) node.outputContract = { kind: 'none' };
+      state.taskPolicy.requiredNodes[0].outputContract = outputContract;
+      state.policyDigest = sha256Hex(state.taskPolicy);
+      state.receipt.schemaVersion = '1.1.0';
+      state.receipt.taskPolicyDigest = state.policyDigest;
+      state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
+      return state;
+    }
+    const roster = {
+      expectedPackageCount: 1,
+      packages: [
+        {
+          packageName: '@fixture/package-0',
+          workspace: 'packages/package-0',
+          resultPath: 'mutation/package-0.result.json',
+          reportPath: 'mutation/package-0.stryker.json',
+          thresholds: { break: 90, high: 100, low: 90 },
+        },
+      ],
+      summaryPath: 'mutation/summary.json',
+    };
+    const cases = [
+      ['SCHEMA_INVALID', { kind: 'mutation-report-set-v2', schemaVersion: '2.0.0', ...roster }],
+      ['SCHEMA_INVALID', { kind: 'mutation-report-set-v2' }],
+      ['SCHEMA_INVALID', { kind: 'mutation-report-set-v1', ...roster }],
+      ['MUTATION_VERSION_UNSUPPORTED', { kind: 'mutation-report-set-v3', ...roster }],
+    ];
+    for (const [code, outputContract] of cases) {
+      const state = signedPolicy(outputContract);
+      expectCode(code, () => verify(state, { artifactsDir: state.root }));
+    }
+  });
+
   it('passes the signed receipt candidate into composed mutation verification', () => {
     const state = composedEvidenceFixture();
     const verified = verify(state, { artifactsDir: state.artifactsDir });
@@ -479,6 +730,38 @@ describe('candidate-independent evidence verification', () => {
     );
   });
 
+  it('inspects signed v2 mutation documents declared under an opaque extension', () => {
+    for (const extension of ['json', 'bin']) {
+      const clean = signedMutationV2Fixture({ extension });
+      const verified = verify(clean, { artifactsDir: clean.artifactsDir });
+      assert.deepEqual(verified.verifiedMutation, [
+        {
+          nodeId: 'test:mutation',
+          packageCount: 1,
+          score: 100,
+          statusTotals: clean.statusTotals,
+          evidenceSetDigest: clean.evidenceSetDigest,
+        },
+      ]);
+
+      const credential = signedMutationV2Fixture({
+        extension,
+        replacement: `gho_${'a'.repeat(36)}`,
+      });
+      expectCode('ARTIFACT_CREDENTIAL_MATERIAL', () =>
+        verify(credential, { artifactsDir: credential.artifactsDir }),
+      );
+
+      const hostPath = signedMutationV2Fixture({
+        extension,
+        summarySha256: '/Volumes/Thiamat/stynx/mutation/summary.json',
+      });
+      expectCode('ARTIFACT_HOST_PATH', () =>
+        verify(hostPath, { artifactsDir: hostPath.artifactsDir }),
+      );
+    }
+  });
+
   it('rejects revoked and untrusted signers', () => {
     const revoked = fixture();
     revoked.trustStore.revokedSignerIds.push('owner-workstation');
@@ -489,11 +772,25 @@ describe('candidate-independent evidence verification', () => {
     expectCode('SIGNER_UNTRUSTED', () => verify(untrusted));
   });
 
-  it('rejects missing, FAIL, ABORTED, and unknown task results', () => {
+  it('rejects missing, symlinked, FAIL, ABORTED, and unknown task results', () => {
     const missing = fixture();
     const missingTask = missing.receipt.tasks[0];
     unlinkSync(join(missing.resultsDir, `${missingTask.resultDigest}.json`));
     expectCode('INPUT_MISSING', () => verify(missing));
+
+    // The link points at the very bytes the receipt digest commits to, so a verifier
+    // that followed it would report success on a file outside the results directory.
+    const linked = fixture();
+    const linkedPath = join(linked.resultsDir, `${linked.receipt.tasks[0].resultDigest}.json`);
+    const external = join(linked.root, 'external-result.json');
+    renameSync(linkedPath, external);
+    symlinkSync(external, linkedPath);
+    assert.throws(
+      () => verify(linked),
+      (error) =>
+        error.code === 'RESULT_INVALID' &&
+        error.message === 'task result unit:core must be a regular non-symlink file',
+    );
 
     for (const status of ['FAIL', 'ABORTED', 'UNKNOWN']) {
       const state = fixture();

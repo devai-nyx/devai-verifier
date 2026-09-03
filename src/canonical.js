@@ -1,48 +1,13 @@
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { VerificationError } from './canonical-json.js';
 
-export class VerificationError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.name = 'VerificationError';
-    this.code = code;
-  }
-}
-
-export function canonicalize(value, path = '$') {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) {
-      throw new VerificationError('NON_CANONICAL_JSON', `${path} contains a non-finite number`);
-    }
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry, index) => canonicalize(entry, `${path}[${index}]`)).join(',')}]`;
-  }
-  if (typeof value === 'object') {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new VerificationError('NON_CANONICAL_JSON', `${path} is not a plain JSON object`);
-    }
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalize(value[key], `${path}.${key}`)}`)
-      .join(',')}}`;
-  }
-  throw new VerificationError('NON_CANONICAL_JSON', `${path} contains a non-JSON value`);
-}
-
-export function canonicalBytes(value) {
-  return Buffer.from(canonicalize(value), 'utf8');
-}
-
-export function sha256Hex(value) {
-  const bytes = Buffer.isBuffer(value) ? value : canonicalBytes(value);
-  return createHash('sha256').update(bytes).digest('hex');
-}
+export {
+  VerificationError,
+  canonicalBytes,
+  canonicalize,
+  framedDigest,
+  sha256Hex,
+} from './canonical-json.js';
 
 export function readJson(path, label) {
   let text;

@@ -1,15 +1,24 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { validateArtifactContent } from './artifact-safety.js';
 import {
   VerificationError,
   assertExactKeys,
   assertObject,
   assertString,
   assertUniqueStrings,
+  canonicalBytes,
   canonicalize,
   sha256Hex,
 } from './canonical.js';
+import {
+  MUTATION_V21_SCHEMA,
+  finalizeMutationReportSetV21,
+  validateMutationContractV21,
+  verifyMutationReportSetV21,
+} from './mutation-v21.js';
+import { readRootRelativeRegularFile } from './safe-path.js';
 
 const PACKAGE_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/u;
 const PORTABLE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)(?!.*\0)[^/]+(?:\/[^/]+)*$/u;
@@ -26,6 +35,96 @@ const MUTANT_STATUSES = [
   'Timeout',
 ];
 const STRYKER_CONFIG = /^stryker\.(?:conf|config)\.(?:cjs|js|json|mjs|ts)$/u;
+
+const MUTATION_SET_KIND = /^mutation-(?:composed-)?report-set-v\d+$/u;
+const CONTRACT_V1 = 'mutation-report-set-v1';
+const CONTRACT_V2 = 'mutation-report-set-v2';
+const SUMMARY_V1 = 'mutation-report-set-v1';
+const SUMMARY_COMPOSED_V1 = 'mutation-composed-report-set-v1';
+const SUMMARY_COMPOSED_V2 = 'mutation-composed-report-set-v2';
+const SCHEMA_V1 = '1.0.0';
+const SCHEMA_V2 = '2.0.0';
+const EVIDENCE_REF_KIND = 'mutation-package-evidence-ref-v2';
+const EVIDENCE_REF_KEYS = [
+  'baselineCommit',
+  'baselineTree',
+  'inputProjectionDigest',
+  'kind',
+  'packageName',
+  'provenance',
+  'reportDigest',
+  'reportPath',
+  'resultDigest',
+  'resultPath',
+  'workspace',
+];
+// Both composed versions carry the same mandatory top-level metadata: v2 keeps
+// candidate, baseline, and semantic-rebind binding required even for an all-fresh
+// composition, so the reduced all-fresh summary is rejected rather than accepted.
+const COMPOSED_SUMMARY_KEYS = [
+  'aggregate',
+  'baseline',
+  'candidate',
+  'complete',
+  'kind',
+  'packages',
+  'passed',
+  'schemaVersion',
+  'semanticRebindComparison',
+];
+const SUMMARY_V2_PACKAGE_KEYS = [
+  'baselineCommit',
+  'baselineTree',
+  'durationMs',
+  'evidenceRef',
+  'evidenceRefDigest',
+  'inputProjectionDigest',
+  'packageName',
+  'passed',
+  'process',
+  'provenance',
+  'reportDigest',
+  'reportPath',
+  'resultDigest',
+  'resultPath',
+  'score',
+  'statusTotals',
+  'targetCensus',
+  'thresholds',
+  'workspace',
+];
+const SUMMARY_V1_AGGREGATE_KEYS = [
+  'durationMs',
+  'freshDurationMs',
+  'freshPackageCount',
+  'packageCount',
+  'reusedPackageCount',
+  'score',
+  'statusTotals',
+];
+const SUMMARY_V2_AGGREGATE_KEYS = [
+  'durationMs',
+  'evidenceSetDigest',
+  'freshDurationMs',
+  'freshPackageCount',
+  'packageCount',
+  'reusedDurationMs',
+  'reusedPackageCount',
+  'score',
+  'statusTotals',
+];
+const COMPOSED_V1 = {
+  aggregateKeys: SUMMARY_V1_AGGREGATE_KEYS,
+  keys: COMPOSED_SUMMARY_KEYS,
+  kind: SUMMARY_COMPOSED_V1,
+  schemaVersion: SCHEMA_V1,
+};
+const COMPOSED_V2 = {
+  aggregateKeys: SUMMARY_V2_AGGREGATE_KEYS,
+  keys: COMPOSED_SUMMARY_KEYS,
+  kind: SUMMARY_COMPOSED_V2,
+  schemaVersion: SCHEMA_V2,
+};
 
 function git(repo, args) {
   const result = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
@@ -225,7 +324,21 @@ function validateSuccessfulProcess(value, label) {
   }
 }
 
-function readCanonicalJson(path, label) {
+/**
+ * Reads a declared mutation artifact as canonical JSON.
+ *
+ * `inspectPath` is the portable declared path; supplying it also runs the bounded
+ * content-safety inspection over the exact file bytes. Mutation report sets from
+ * `mutation-report-set-v2` always supply it so that standalone mutation
+ * verification rejects credential material and workstation paths on its own,
+ * without depending on an enclosing bundle walk.
+ *
+ * The inspection media type is pinned to `application/json` rather than inferred
+ * from the declared filename: a v2 contract may declare any portable path, so an
+ * extension such as `.bin` would otherwise be treated as opaque and skip the
+ * safety scan over a document this function has already parsed as JSON.
+ */
+function readCanonicalJson(path, label, inspectPath) {
   let text;
   let value;
   try {
@@ -236,6 +349,13 @@ function readCanonicalJson(path, label) {
       'MUTATION_REPORT_INVALID',
       `${label} is unreadable: ${error.message}`,
     );
+  }
+  if (inspectPath !== undefined) {
+    validateArtifactContent({
+      bytes: Buffer.from(text, 'utf8'),
+      path: inspectPath,
+      mediaType: 'application/json',
+    });
   }
   if (text !== canonicalize(value) && text !== `${canonicalize(value)}\n`) {
     throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
@@ -315,15 +435,22 @@ function validatePackageContract(entry, label) {
   validateThresholds(entry.thresholds, `${label}.thresholds`);
 }
 
-export function validateMutationContract(contract, label) {
-  assertExactKeys(
-    contract,
-    ['expectedPackageCount', 'kind', 'packages', 'paths', 'summaryPath'],
-    label,
+/**
+ * Reports the supported mutation-report-set contract version for a declared kind.
+ * Returns `undefined` for kinds that are not mutation report sets at all, and fails
+ * closed for every mutation report-set version this verifier does not implement.
+ */
+export function mutationContractVersion(kind, label = 'mutation output contract') {
+  if (typeof kind !== 'string' || !kind.startsWith('mutation-')) return undefined;
+  if (kind === CONTRACT_V1) return 1;
+  if (kind === CONTRACT_V2) return 2;
+  throw new VerificationError(
+    'MUTATION_VERSION_UNSUPPORTED',
+    `${label} declares an unsupported mutation report-set version`,
   );
-  if (contract.kind !== 'mutation-report-set-v1') {
-    throw new VerificationError('SCHEMA_INVALID', `${label}.kind is unsupported`);
-  }
+}
+
+function validateContractRoster(contract, label) {
   assertNonnegativeInteger(contract.expectedPackageCount, `${label}.expectedPackageCount`);
   if (contract.expectedPackageCount === 0 || !Array.isArray(contract.packages)) {
     throw new VerificationError('SCHEMA_INVALID', `${label}.packages must be nonempty`);
@@ -353,6 +480,37 @@ export function validateMutationContract(contract, label) {
       `${label}.paths differs from the mutation artifact roster`,
     );
   }
+}
+
+export function validateMutationContract(contract, label) {
+  if (contract?.kind === CONTRACT_V2 && contract?.schemaVersion === MUTATION_V21_SCHEMA) {
+    validateMutationContractV21(contract, label);
+    return;
+  }
+  if (mutationContractVersion(contract?.kind, label) === 2) {
+    assertExactKeys(
+      contract,
+      ['expectedPackageCount', 'kind', 'packages', 'paths', 'schemaVersion', 'summaryPath'],
+      label,
+    );
+    if (contract.schemaVersion !== SCHEMA_V2) {
+      throw new VerificationError(
+        'MUTATION_VERSION_UNSUPPORTED',
+        `${label}.schemaVersion is unsupported`,
+      );
+    }
+    validateContractRoster(contract, label);
+    return;
+  }
+  assertExactKeys(
+    contract,
+    ['expectedPackageCount', 'kind', 'packages', 'paths', 'summaryPath'],
+    label,
+  );
+  if (contract.kind !== CONTRACT_V1) {
+    throw new VerificationError('SCHEMA_INVALID', `${label}.kind is unsupported`);
+  }
+  validateContractRoster(contract, label);
 }
 
 function validatePackageResult(result, contract, report, reportDigest, metrics, label) {
@@ -437,26 +595,12 @@ function mutationSummaryMismatch() {
   );
 }
 
-function validateComposedSummary(summary, candidateCommit, candidateTree, expectedPackageCount) {
+function validateComposedSummary(summary, candidateCommit, candidateTree, expectedPackageCount, spec) {
   try {
-    assertExactKeys(
-      summary,
-      [
-        'aggregate',
-        'baseline',
-        'candidate',
-        'complete',
-        'kind',
-        'packages',
-        'passed',
-        'schemaVersion',
-        'semanticRebindComparison',
-      ],
-      'composed mutation summary',
-    );
+    assertExactKeys(summary, spec.keys, 'composed mutation summary');
     if (
-      summary.schemaVersion !== '1.0.0' ||
-      summary.kind !== 'mutation-composed-report-set-v1' ||
+      summary.schemaVersion !== spec.schemaVersion ||
+      summary.kind !== spec.kind ||
       summary.complete !== true ||
       summary.passed !== true
     ) {
@@ -549,19 +693,7 @@ function validateComposedSummary(summary, candidateCommit, candidateTree, expect
     if (!Array.isArray(summary.packages) || summary.packages.length !== expectedPackageCount) {
       mutationSummaryMismatch();
     }
-    assertExactKeys(
-      summary.aggregate,
-      [
-        'durationMs',
-        'freshDurationMs',
-        'freshPackageCount',
-        'packageCount',
-        'reusedPackageCount',
-        'score',
-        'statusTotals',
-      ],
-      'composed mutation aggregate',
-    );
+    assertExactKeys(summary.aggregate, spec.aggregateKeys, 'composed mutation aggregate');
   } catch (error) {
     if (error instanceof VerificationError && error.code === 'MUTATION_SUMMARY_MISMATCH') {
       throw error;
@@ -588,24 +720,130 @@ function composedInputProjectionDigest(entry, index) {
   }
 }
 
+/**
+ * Decides whether a summary uses the composed shape for its contract version, and
+ * fails closed on any mutation report-set version this verifier does not implement.
+ * A `mutation-report-set-v2` contract always requires the composed v2 summary, so
+ * the reduced all-fresh shape that omits baseline and semantic-rebind metadata is
+ * rejected instead of silently accepted.
+ */
+function composedSummaryShape(summary, version) {
+  const kind = summary?.kind;
+  const supported = version === 2 ? [SUMMARY_COMPOSED_V2] : [SUMMARY_V1, SUMMARY_COMPOSED_V1];
+  if (!supported.includes(kind) && typeof kind === 'string' && MUTATION_SET_KIND.test(kind)) {
+    throw new VerificationError(
+      'MUTATION_VERSION_UNSUPPORTED',
+      'mutation summary declares an unsupported mutation report-set version',
+    );
+  }
+  return version === 2 || kind === SUMMARY_COMPOSED_V1;
+}
+
+/**
+ * Binds one composed v2 summary entry to the recomputed package evidence.
+ *
+ * The evidence reference is immutable: it is content-addressed by
+ * `evidenceRefDigest`, and every reference digest is in turn bound by
+ * `aggregate.evidenceSetDigest`, so no package evidence can be substituted,
+ * added, or dropped without breaking a digest the verifier recomputes.
+ */
+function validateEvidenceBinding(entry, expectedRef, fresh, index) {
+  const label = `composed mutation packages[${index}]`;
+  let ref;
+  try {
+    assertExactKeys(
+      entry,
+      fresh ? SUMMARY_V2_PACKAGE_KEYS : SUMMARY_V2_PACKAGE_KEYS.filter((key) => key !== 'process'),
+      label,
+    );
+    assertString(entry.evidenceRefDigest, `${label}.evidenceRefDigest`, SHA256);
+    ref = entry.evidenceRef;
+    assertExactKeys(ref, EVIDENCE_REF_KEYS, `${label}.evidenceRef`);
+  } catch (error) {
+    if (error instanceof VerificationError && error.code === 'MUTATION_SUMMARY_MISMATCH') {
+      throw error;
+    }
+    mutationSummaryMismatch();
+  }
+  if (ref.kind !== EVIDENCE_REF_KIND) {
+    throw new VerificationError(
+      'MUTATION_VERSION_UNSUPPORTED',
+      `${label}.evidenceRef declares an unsupported evidence reference version`,
+    );
+  }
+  for (const key of ['packageName', 'reportPath', 'resultPath', 'workspace']) {
+    if (ref[key] !== expectedRef[key] || entry[key] !== expectedRef[key]) {
+      throw new VerificationError(
+        'MUTATION_ROSTER_MISMATCH',
+        `${label} ${key} differs from the mutation package roster`,
+      );
+    }
+  }
+  for (const key of ['reportDigest', 'resultDigest']) {
+    if (ref[key] !== expectedRef[key] || entry[key] !== expectedRef[key]) {
+      throw new VerificationError(
+        'ARTIFACT_DIGEST_MISMATCH',
+        `${label} ${key} differs from the recomputed artifact digest`,
+      );
+    }
+  }
+  if (entry.evidenceRefDigest !== sha256Hex(ref)) {
+    throw new VerificationError(
+      'ARTIFACT_DIGEST_MISMATCH',
+      `${label}.evidenceRefDigest does not bind its own evidence reference`,
+    );
+  }
+  if (canonicalize(ref) !== canonicalize(expectedRef)) mutationSummaryMismatch();
+}
+
 export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   validateMutationContract(contract, 'mutation output contract');
+  if (contract.schemaVersion === MUTATION_V21_SCHEMA) {
+    return verifyMutationReportSetV21(
+      contract,
+      (path, label) => {
+        const raw = readRootRelativeRegularFile(artifactsDir, path, label);
+        validateArtifactContent({
+          bytes: raw,
+          path,
+          mediaType: 'application/json',
+        });
+        let value;
+        try {
+          value = JSON.parse(raw.toString('utf8'));
+        } catch {
+          throw new VerificationError('MUTATION_REPORT_INVALID', `${label} is not valid JSON`);
+        }
+        const bytes = canonicalBytes(value);
+        if (!raw.equals(bytes) && !raw.equals(Buffer.concat([bytes, Buffer.from('\n')]))) {
+          throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
+        }
+        return { value, bytes };
+      },
+      options,
+    );
+  }
+  const version = mutationContractVersion(contract.kind, 'mutation output contract');
+  const inspect = (path) => (version === 2 ? path : undefined);
   const summaryFile = readCanonicalJson(
     join(artifactsDir, contract.summaryPath),
     'mutation summary',
+    inspect(contract.summaryPath),
   );
   const summary = summaryFile.value;
-  const composed = summary?.kind === 'mutation-composed-report-set-v1';
+  const composed = composedSummaryShape(summary, version);
   const composedMetadata = composed
     ? validateComposedSummary(
         summary,
         options.candidateCommit,
         options.candidateTree,
         contract.expectedPackageCount,
+        version === 2 ? COMPOSED_V2 : COMPOSED_V1,
       )
     : undefined;
   const aggregateTotals = Object.fromEntries(MUTANT_STATUSES.map((status) => [status, 0]));
   const summaryEntries = [];
+  const evidenceRefDigests = [];
   let durationMs = 0;
   let freshDurationMs = 0;
   let freshPackageCount = 0;
@@ -613,10 +851,12 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
     const reportFile = readCanonicalJson(
       join(artifactsDir, packageContract.reportPath),
       `mutation report ${packageContract.packageName}`,
+      inspect(packageContract.reportPath),
     );
     const resultFile = readCanonicalJson(
       join(artifactsDir, packageContract.resultPath),
       `mutation result ${packageContract.packageName}`,
+      inspect(packageContract.resultPath),
     );
     const reportDigest = sha256Hex(reportFile.bytes);
     const resultDigest = sha256Hex(resultFile.bytes);
@@ -655,11 +895,35 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
         freshPackageCount += 1;
         freshDurationMs += resultFile.value.durationMs;
       }
+      const baselineCommit = fresh ? null : composedMetadata.baseline.commit;
+      const baselineTree = fresh ? null : composedMetadata.baseline.tree;
+      const inputProjectionDigest = composedInputProjectionDigest(summary.packages[index], index);
+      let evidenceRef;
+      let evidenceRefDigest;
+      if (version === 2) {
+        evidenceRef = {
+          baselineCommit,
+          baselineTree,
+          inputProjectionDigest,
+          kind: EVIDENCE_REF_KIND,
+          packageName: packageContract.packageName,
+          provenance: fresh ? 'fresh' : 'reused',
+          reportDigest,
+          reportPath: packageContract.reportPath,
+          resultDigest,
+          resultPath: packageContract.resultPath,
+          workspace: packageContract.workspace,
+        };
+        evidenceRefDigest = sha256Hex(evidenceRef);
+        evidenceRefDigests.push(evidenceRefDigest);
+        validateEvidenceBinding(summary.packages[index], evidenceRef, fresh, index);
+      }
       summaryEntries.push({
-        baselineCommit: fresh ? null : composedMetadata.baseline.commit,
-        baselineTree: fresh ? null : composedMetadata.baseline.tree,
+        baselineCommit,
+        baselineTree,
         durationMs: resultFile.value.durationMs,
-        inputProjectionDigest: composedInputProjectionDigest(summary.packages[index], index),
+        ...(version === 2 && { evidenceRef, evidenceRefDigest }),
+        inputProjectionDigest,
         packageName: packageContract.packageName,
         passed: true,
         ...(fresh && { process: resultFile.value.process }),
@@ -691,13 +955,21 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   const scored = detected + aggregateTotals.Survived + aggregateTotals.NoCoverage;
   const aggregateScore = scored === 0 ? 100 : (detected / scored) * 100;
   const reusedPackageCount = contract.expectedPackageCount - freshPackageCount;
-  if (composed && (freshPackageCount === 0 || reusedPackageCount === 0)) {
+  const reusedDurationMs = durationMs - freshDurationMs;
+  const evidenceSetDigest = sha256Hex(evidenceRefDigests);
+  if (composed && version === 1 && (freshPackageCount === 0 || reusedPackageCount === 0)) {
     mutationSummaryMismatch();
+  }
+  if (version === 2 && summary.aggregate?.evidenceSetDigest !== evidenceSetDigest) {
+    throw new VerificationError(
+      'ARTIFACT_DIGEST_MISMATCH',
+      'composed mutation aggregate.evidenceSetDigest does not bind the package evidence references',
+    );
   }
   const expectedSummary = composed
     ? {
-        schemaVersion: '1.0.0',
-        kind: 'mutation-composed-report-set-v1',
+        schemaVersion: version === 2 ? SCHEMA_V2 : SCHEMA_V1,
+        kind: version === 2 ? SUMMARY_COMPOSED_V2 : SUMMARY_COMPOSED_V1,
         candidate: {
           commit: options.candidateCommit,
           tree: options.candidateTree,
@@ -713,6 +985,7 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
           reusedPackageCount,
           durationMs,
           freshDurationMs,
+          ...(version === 2 && { reusedDurationMs, evidenceSetDigest }),
           score: aggregateScore,
           statusTotals: aggregateTotals,
         },
@@ -740,7 +1013,8 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
     packageCount: contract.expectedPackageCount,
     score: aggregateScore,
     statusTotals: aggregateTotals,
+    ...(version === 2 && { evidenceSetDigest }),
   };
 }
 
-export { MUTANT_STATUSES };
+export { EVIDENCE_REF_KIND, MUTANT_STATUSES, finalizeMutationReportSetV21 };

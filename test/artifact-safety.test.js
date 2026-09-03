@@ -49,16 +49,47 @@ describe('portable artifact content safety', () => {
       '/Users/inspector/project/report.json',
       '/home/inspector/project/report.json',
       '/private/tmp/devai/report.json',
+      '/Volumes/Thiamat/stech/devai-verifier/report.json',
+      '/Volumes/Backup',
+      '/var/folders/q7/9m0xk1_s0fs/T/devai-export/report.json',
+      '/private/var/folders/q7/9m0xk1_s0fs/T/devai-export/report.json',
       'file:///Users/inspector/project/report.json',
+      'file:///Volumes/Thiamat/stech/report.json',
+      'file:///var/folders/q7/9m0xk1_s0fs/T/report.json',
       'C:\\Users\\inspector\\project\\report.json',
     ];
     for (const value of values) {
-      expectCode('ARTIFACT_HOST_PATH', () =>
-        validateArtifactContent({
-          bytes: Buffer.from(JSON.stringify({ value })),
-          path: 'mutation/report.json',
-        }),
+      const bytes = Buffer.from(JSON.stringify({ value }));
+      assert.throws(
+        () => validateArtifactContent({ bytes, path: 'mutation/report.json' }),
+        (error) => {
+          assert.equal(error.code, 'ARTIFACT_HOST_PATH');
+          // The refusal names the declared artifact, never the matched workstation
+          // path, so a fail-closed message cannot itself leak the operator's layout.
+          assert.equal(
+            error.message,
+            'artifact mutation/report.json contains a workstation-specific absolute path',
+          );
+          assert.equal(error.message.includes(value), false);
+          return true;
+        },
       );
+    }
+  });
+
+  it('accepts portable relative paths that merely share a workstation root name', () => {
+    const values = [
+      'Volumes/data/report.json',
+      'packages/core/var/folders/report.json',
+      'dist/Volumes/index.js',
+      'var/folders/report.json',
+      'src/home/user/index.ts',
+    ];
+    for (const value of values) {
+      validateArtifactContent({
+        bytes: Buffer.from(JSON.stringify({ value })),
+        path: 'mutation/report.json',
+      });
     }
   });
 

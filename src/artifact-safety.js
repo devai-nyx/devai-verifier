@@ -12,11 +12,20 @@ const CREDENTIAL_PATTERNS = [
   /\b(?:https?|npm):\/\/[^\s/:]+:[^\s@/]+@/u,
 ];
 
+// Every pattern is anchored on an absolute root that only exists on a particular
+// workstation and is bounded so a hostile artifact cannot drive the scan quadratic.
+// A portable relative path such as `Volumes/data/report.json` never carries the
+// leading separator these patterns require, so it stays acceptable.
 const HOST_PATH_PATTERNS = [
-  /(?:^|[\s"'=:,(])\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/[^\s"']*)?/u,
-  /(?:^|[\s"'=:,(])\/(?:private\/)?tmp\/(?:[^\s"']+)/u,
-  /\bfile:\/\/\/(?:Users|home|(?:private\/)?tmp)\/(?:[^\s"']+)/u,
-  /(?:^|[\s"'=:,(])[A-Za-z]:\\{1,2}Users\\{1,2}[^\s"']+/u,
+  /(?:^|[\s"'=:,(])\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/[^\s"']{0,4096})?/u,
+  /(?:^|[\s"'=:,(])\/(?:private\/)?tmp\/[^\s"']{1,4096}/u,
+  // macOS mounts external and secondary disks under /Volumes and gives each user a
+  // per-boot scratch root under /var/folders; both leak the operator's workstation
+  // exactly the way a home directory does.
+  /(?:^|[\s"'=:,(])\/Volumes\/[A-Za-z0-9._-]{1,255}(?:\/[^\s"']{0,4096})?/u,
+  /(?:^|[\s"'=:,(])\/(?:private\/)?var\/folders\/[A-Za-z0-9._+-]{1,255}(?:\/[^\s"']{0,4096})?/u,
+  /\bfile:\/\/\/(?:Users|home|Volumes|(?:private\/)?(?:tmp|var\/folders))\/[^\s"']{1,4096}/u,
+  /(?:^|[\s"'=:,(])[A-Za-z]:\\{1,2}Users\\{1,2}[^\s"']{1,4096}/u,
 ];
 
 export function artifactMediaType(path) {

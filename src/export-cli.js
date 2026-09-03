@@ -11,11 +11,13 @@ const required = new Set([
   'tree',
   'toolchain',
   'environment',
-  'private-key',
   'public-key',
   'signer-id',
   'output-dir',
 ]);
+// --private-key is required only for a signing export. A preflight verifies the same
+// candidate without it, so it stays optional and is never forwarded in preflight mode.
+const signing = new Set(['private-key']);
 const optional = new Set(['base', 'preflight']);
 
 function parse(argv) {
@@ -27,12 +29,17 @@ function parse(argv) {
       throw new VerificationError('USAGE', 'arguments must be --name value pairs');
     }
     const name = token.slice(2);
-    if ((!required.has(name) && !optional.has(name)) || values[name] !== undefined) {
+    const known = required.has(name) || signing.has(name) || optional.has(name);
+    if (!known || values[name] !== undefined) {
       throw new VerificationError('USAGE', `unknown or duplicate argument --${name}`);
     }
     values[name] = value;
   }
-  const missing = [...required].filter((name) => values[name] === undefined);
+  if (values.preflight !== undefined && values.preflight !== 'true') {
+    throw new VerificationError('USAGE', '--preflight must be true when supplied');
+  }
+  const expected = values.preflight === 'true' ? required : new Set([...required, ...signing]);
+  const missing = [...expected].filter((name) => values[name] === undefined);
   if (missing.length > 0) {
     throw new VerificationError(
       'USAGE',
@@ -49,9 +56,7 @@ function emitError(code, message, exitCode) {
 
 try {
   const values = parse(process.argv.slice(2));
-  if (values.preflight !== undefined && values.preflight !== 'true') {
-    throw new VerificationError('USAGE', '--preflight must be true when supplied');
-  }
+  const preflight = values.preflight === 'true';
   const options = {
     repo: values.repo,
     receiptPath: values.receipt,
@@ -62,19 +67,18 @@ try {
     baseCommit: values.base,
     toolchainPath: values.toolchain,
     environmentPath: values.environment,
-    privateKeyPath: values['private-key'],
+    privateKeyPath: preflight ? undefined : values['private-key'],
     publicKeyPath: values['public-key'],
     signerId: values['signer-id'],
     outputDir: values['output-dir'],
   };
-  const result =
-    values.preflight === 'true'
-      ? {
-          ok: true,
-          preflight: true,
-          taskPolicyDigest: preflightCandidateEvidence(options).built.taskPolicyDigest,
-        }
-      : exportCandidateEvidence(options);
+  const result = preflight
+    ? {
+        ok: true,
+        preflight: true,
+        taskPolicyDigest: preflightCandidateEvidence(options).built.taskPolicyDigest,
+      }
+    : exportCandidateEvidence(options);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   if (error instanceof VerificationError) {
