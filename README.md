@@ -116,7 +116,8 @@ policy digest, or verifier implementation.
 - A task policy with exact required nodes, task keys, and dependencies.
 - A trust store with Ed25519 public keys and revoked signer IDs.
 - Expected repository ID, commit, tree, and task-policy digest supplied by the
-  independent caller.
+  independent caller; v2.1 bundle verification and publication also require
+  expected signer ID, trust-root ID, trust-store digest, and key ID.
 
 Schemas are under `schemas/`. The executable verifier performs strict shape
 validation without a third-party schema library.
@@ -144,6 +145,50 @@ Exit contract:
 - `70`: unexpected verifier failure; empty stdout and one JSON error object on stderr.
 
 Run focused tests with `node --test`.
+
+For a bundle containing mutation schema `2.1.0`, use `src/bundle-cli.js` with
+all eight externally pinned identities. The direct `src/cli.js` example above
+does not expose the four additional trust-identity flags. Replace every
+placeholder below with an independently approved value, not a value inferred
+from the candidate or its bundle:
+
+```text
+node src/bundle-cli.js \
+  --bundle /protected/evidence/<exact-commit> \
+  --trust /protected/control/trust-store.json \
+  --repository <expected-repository-id> \
+  --commit <exact-commit> \
+  --tree <exact-tree> \
+  --policy-digest <expected-task-policy-sha256> \
+  --signer-id <expected-signer-id> \
+  --trust-root-id <expected-trust-root-id> \
+  --trust-store-digest <expected-canonical-trust-store-sha256> \
+  --key-id <expected-key-id> \
+  --binding exact-commit
+```
+
+The trust-store digest is `sha256Hex(trustStore)` over the **parsed JSON
+object**: SHA-256 of its canonical UTF-8 JSON bytes, with sorted object keys
+and no insignificant whitespace. Array order is preserved. It is not a hash of
+the raw file bytes; do not use `sha256sum trust-store.json` or
+`shasum -a 256 trust-store.json` as the general computation. From the approved
+verifier checkout, an operator can compute the digest of the independently
+controlled trust store without printing its contents:
+
+```sh
+node --input-type=module - /protected/control/trust-store.json <<'JS'
+import { sha256Hex } from './src/canonical.js';
+import { readAbsoluteRegularFile } from './src/safe-path.js';
+const trustStore = JSON.parse(
+  readAbsoluteRegularFile(process.argv[2], 'trust store').toString('utf8'),
+);
+console.log(sha256Hex(trustStore));
+JS
+```
+
+Pin that digest through protected operator configuration. Computing a digest
+does not approve a trust store or its keys, and a candidate-supplied trust
+store must never establish its own expected identity.
 
 ## Trusted local export
 
@@ -207,10 +252,23 @@ node src/publish-cli.js \
   --repo /exact/candidate \
   --bundle /protected/evidence/<exact-commit> \
   --trust /protected/control/trust-store.json \
+  --repository <expected-repository-id> \
+  --commit <exact-commit> \
+  --tree <exact-tree> \
+  --policy-digest <expected-task-policy-sha256> \
+  --signer-id <expected-signer-id> \
+  --trust-root-id <expected-trust-root-id> \
+  --trust-store-digest <expected-canonical-trust-store-sha256> \
+  --key-id <expected-key-id> \
   --tag-prefix devai-local-evidence/ \
   --workflow devai-local-rc-verify.yml \
   --default-branch main
 ```
+
+All eight identity flags are mandatory when publishing mutation v2.1 evidence,
+even though the CLI parser also supports legacy inputs. Use the same protected
+pins as the offline bundle verification above. An omitted expectation is
+rejected with `MUTATION_OFFLINE_EXPECTATION_MISSING` before publication.
 
 An existing tag is accepted only when its proof-tree bytes are identical.
 Different bytes fail with `TAG_COLLISION`; tags are never updated or deleted.
