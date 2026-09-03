@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
 
+export function containsAsciiControl(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 export class VerificationError extends Error {
   constructor(code, message) {
     super(message);
@@ -52,7 +60,10 @@ export function sha256Hex(value) {
  */
 export function framedDigest(domain, value) {
   if (typeof domain !== 'string' || domain.length === 0 || domain.includes('\0')) {
-    throw new VerificationError('SCHEMA_INVALID', 'digest domain must be nonempty and contain no NUL');
+    throw new VerificationError(
+      'SCHEMA_INVALID',
+      'digest domain must be nonempty and contain no NUL',
+    );
   }
   const domainBytes = Buffer.from(domain, 'ascii');
   if (domainBytes.toString('ascii') !== domain) {

@@ -40,7 +40,10 @@ function objectContentDigests(repo, objectIds) {
   const unique = [...new Set(objectIds)].sort();
   if (unique.length === 0) return new Map();
   const output = Buffer.from(
-    git(repo, ['cat-file', '--batch'], { encoding: null, input: `${unique.join('\n')}\n` }),
+    git(repo, ['cat-file', '--batch'], {
+      encoding: null,
+      input: `${unique.join('\n')}\n`,
+    }),
   );
   const digests = new Map();
   let offset = 0;
@@ -120,7 +123,9 @@ function validateSelector(selector, label) {
   if (!['exact', 'prefix', 'glob'].includes(selector.kind)) {
     throw new VerificationError('SCHEMA_INVALID', `${label}.kind is invalid`);
   }
-  normalizePath(selector.pattern, `${label}.pattern`, { prefix: selector.kind === 'prefix' });
+  normalizePath(selector.pattern, `${label}.pattern`, {
+    prefix: selector.kind === 'prefix',
+  });
   if (selector.kind === 'glob') globExpression(selector.pattern);
 }
 
@@ -296,7 +301,10 @@ function validateDescriptor(descriptor) {
     const eligible = new Set(profile.eligibleNodes ?? []);
     for (const nodeId of [...profile.requiredNodes, ...eligible]) {
       if (!knownTasks.has(nodeId)) {
-        throw new VerificationError('PROFILE_NODE_UNKNOWN', `${label} names unknown node ${nodeId}`);
+        throw new VerificationError(
+          'PROFILE_NODE_UNKNOWN',
+          `${label} names unknown node ${nodeId}`,
+        );
       }
     }
     if (
@@ -337,7 +345,9 @@ function topologicalTasks(descriptor) {
 }
 
 function snapshot(repo, commit) {
-  const output = git(repo, ['ls-tree', '-r', '-z', '--full-tree', commit], { encoding: null });
+  const output = git(repo, ['ls-tree', '-r', '-z', '--full-tree', commit], {
+    encoding: null,
+  });
   const entries = [];
   for (const record of output.toString('utf8').split('\0')) {
     if (record === '') continue;
@@ -349,7 +359,9 @@ function snapshot(repo, commit) {
     normalizePath(path, 'Git tree path');
     entries.push({ mode, type, objectId, path });
   }
-  return entries.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return entries.sort((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+  );
 }
 
 function changedPaths(repo, base, candidate) {
@@ -375,7 +387,8 @@ function changedPaths(repo, base, candidate) {
       paths.add(after);
     } else if (/^[AMDTUXB]$/u.test(status)) {
       const path = fields[index++];
-      if (path === undefined) throw new VerificationError('GIT_ERROR', 'truncated Git change record');
+      if (path === undefined)
+        throw new VerificationError('GIT_ERROR', 'truncated Git change record');
       normalizePath(path, 'changed path');
       paths.add(path);
     } else {
@@ -403,7 +416,10 @@ function selectedNodeIds(descriptor, profile, changes) {
       );
       if (matched.length === 0) {
         if (descriptor.fallbackNodeId === null) {
-          throw new VerificationError('UNKNOWN_PATH', `changed path ${path} matches no approved task`);
+          throw new VerificationError(
+            'UNKNOWN_PATH',
+            `changed path ${path} matches no approved task`,
+          );
         }
         impacted.add(descriptor.fallbackNodeId);
       } else {
@@ -422,7 +438,11 @@ function selectedNodeIds(descriptor, profile, changes) {
     selected.add(nodeId);
     for (const dependent of dependents.get(nodeId)) {
       const aggregateFallback = dependent === descriptor.fallbackNodeId;
-      if (!aggregateFallback && (eligible === null || eligible.has(dependent)) && !impacted.has(dependent)) {
+      if (
+        !aggregateFallback &&
+        (eligible === null || eligible.has(dependent)) &&
+        !impacted.has(dependent)
+      ) {
         impacted.add(dependent);
         downstreamQueue.push(dependent);
       }
@@ -467,7 +487,10 @@ export function buildExpectedTaskPolicy({
   const candidateTree = git(repo, ['show', '-s', '--format=%T', candidateCommit]).trim();
   assertString(expectedTree, 'expected tree', GIT_OBJECT);
   if (candidateTree !== expectedTree) {
-    throw new VerificationError('TREE_MISMATCH', 'candidate commit tree does not match expected tree');
+    throw new VerificationError(
+      'TREE_MISMATCH',
+      'candidate commit tree does not match expected tree',
+    );
   }
   const profile = descriptor.profiles.find((entry) => entry.profileId === profileId);
   if (profile === undefined) {
@@ -476,12 +499,25 @@ export function buildExpectedTaskPolicy({
   let changes = [];
   if (profile.mode === 'affected') {
     if (baseCommit === undefined) {
-      throw new VerificationError('BASE_REQUIRED', 'affected profile requires an exact base commit');
+      throw new VerificationError(
+        'BASE_REQUIRED',
+        'affected profile requires an exact base commit',
+      );
     }
     resolveCommit(repo, baseCommit, 'base commit');
-    const ancestor = spawnSync('git', ['-C', repo, 'merge-base', '--is-ancestor', baseCommit, candidateCommit]);
+    const ancestor = spawnSync('git', [
+      '-C',
+      repo,
+      'merge-base',
+      '--is-ancestor',
+      baseCommit,
+      candidateCommit,
+    ]);
     if (ancestor.status !== 0) {
-      throw new VerificationError('BASE_NOT_ANCESTOR', 'base commit is not an ancestor of candidate');
+      throw new VerificationError(
+        'BASE_NOT_ANCESTOR',
+        'base commit is not an ancestor of candidate',
+      );
     }
     changes = changedPaths(repo, baseCommit, candidateCommit).filter(
       (path) => !isHarnessMutatedPath(path),
@@ -508,14 +544,20 @@ export function buildExpectedTaskPolicy({
     const selectedToolchain = {};
     for (const key of [...task.toolchainKeys].sort()) {
       if (toolchain[key] === undefined) {
-        throw new VerificationError('TOOLCHAIN_MISSING', `task ${task.nodeId} requires toolchain ${key}`);
+        throw new VerificationError(
+          'TOOLCHAIN_MISSING',
+          `task ${task.nodeId} requires toolchain ${key}`,
+        );
       }
       selectedToolchain[key] = toolchain[key];
     }
     const selectedEnvironment = {};
     for (const key of [...task.allowlistedEnv].sort()) {
       if (!Object.hasOwn(environment, key)) {
-        throw new VerificationError('ENVIRONMENT_MISSING', `task ${task.nodeId} requires environment ${key}`);
+        throw new VerificationError(
+          'ENVIRONMENT_MISSING',
+          `task ${task.nodeId} requires environment ${key}`,
+        );
       }
       if (
         policySchemaVersion === '1.1.0' &&
@@ -534,7 +576,12 @@ export function buildExpectedTaskPolicy({
       if (!task.inputSelectors.some((selector) => selectorMatches(selector, entry.path))) continue;
       const digest = blobDigests.get(entry.objectId);
       if (digest === undefined) throw new VerificationError('GIT_ERROR', 'object digest missing');
-      inputs.push({ path: entry.path, mode: entry.mode, type: entry.type, contentDigest: digest });
+      inputs.push({
+        path: entry.path,
+        mode: entry.mode,
+        type: entry.type,
+        contentDigest: digest,
+      });
     }
     const dependencies = task.dependencies.map((nodeId) => ({
       nodeId,

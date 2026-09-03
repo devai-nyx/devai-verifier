@@ -8,9 +8,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, parse, relative, resolve } from 'node:path';
-import { VerificationError } from './canonical-json.js';
+import { VerificationError, containsAsciiControl } from './canonical-json.js';
 
-const CONTROL = /[\u0000-\u001f\u007f]/u;
 const DRIVE = /^[A-Za-z]:/u;
 
 export function validatePortablePathV21(path, label = 'artifact path') {
@@ -22,7 +21,7 @@ export function validatePortablePathV21(path, label = 'artifact path') {
     DRIVE.test(path) ||
     path.startsWith('//') ||
     path.includes('\\') ||
-    CONTROL.test(path)
+    containsAsciiControl(path)
   ) {
     throw new VerificationError('SCHEMA_INVALID', `${label} is not a canonical portable path`);
   }
@@ -57,7 +56,10 @@ function openRootRelativeRegularFile(root, path, label) {
       if (index >= 0) cursor = join(cursor, segments[index]);
       const stat = lstatSync(cursor);
       if (stat.isSymbolicLink()) {
-        throw new VerificationError('ARTIFACT_SYMLINK_ESCAPE', `${label} traverses a symbolic link`);
+        throw new VerificationError(
+          'ARTIFACT_SYMLINK_ESCAPE',
+          `${label} traverses a symbolic link`,
+        );
       }
       if (index < segments.length - 1 && !stat.isDirectory()) {
         throw new VerificationError('ARTIFACT_INVALID', `${label} ancestor is not a directory`);
@@ -67,10 +69,7 @@ function openRootRelativeRegularFile(root, path, label) {
       }
       snapshots.push({ path: cursor, dev: stat.dev, ino: stat.ino });
     }
-    const descriptor = openSync(
-      cursor,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
+    const descriptor = openSync(cursor, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = fstatSync(descriptor);
     const expected = snapshots.at(-1);
     if (!opened.isFile()) {
@@ -89,7 +88,10 @@ function openRootRelativeRegularFile(root, path, label) {
         current.ino !== snapshot.ino
       ) {
         closeSync(descriptor);
-        throw new VerificationError('ARTIFACT_RACE_DETECTED', `${label} changed during safe access`);
+        throw new VerificationError(
+          'ARTIFACT_RACE_DETECTED',
+          `${label} changed during safe access`,
+        );
       }
     }
     return descriptor;
@@ -129,11 +131,12 @@ export function readAbsoluteRegularFile(path, label) {
   // those platform roots before enforcing the no-follow rule so user-controlled
   // descendants are still checked component by component.
   const requested = resolve(path);
-  const absolute = process.platform === 'darwin' && requested.startsWith('/var/')
-    ? `/private${requested}`
-    : process.platform === 'darwin' && requested.startsWith('/tmp/')
+  const absolute =
+    process.platform === 'darwin' && requested.startsWith('/var/')
       ? `/private${requested}`
-      : requested;
+      : process.platform === 'darwin' && requested.startsWith('/tmp/')
+        ? `/private${requested}`
+        : requested;
   const root = parse(absolute).root;
   const fromRoot = relative(root, absolute).split('\\').join('/');
   return readRootRelativeRegularFile(root, fromRoot, label);

@@ -595,7 +595,13 @@ function mutationSummaryMismatch() {
   );
 }
 
-function validateComposedSummary(summary, candidateCommit, candidateTree, expectedPackageCount, spec) {
+function validateComposedSummary(
+  summary,
+  candidateCommit,
+  candidateTree,
+  expectedPackageCount,
+  spec,
+) {
   try {
     assertExactKeys(summary, spec.keys, 'composed mutation summary');
     if (

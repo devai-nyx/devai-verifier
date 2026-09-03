@@ -3,13 +3,7 @@ import { VerificationError } from './canonical.js';
 import { verifyPreparedBundle } from './publish.js';
 
 const required = new Set(['bundle', 'trust', 'repository', 'commit', 'tree', 'policy-digest']);
-const optional = new Set([
-  'binding',
-  'signer-id',
-  'trust-root-id',
-  'trust-store-digest',
-  'key-id',
-]);
+const optional = new Set(['binding', 'signer-id', 'trust-root-id', 'trust-store-digest', 'key-id']);
 
 function parse(argv) {
   const values = {};
@@ -27,7 +21,10 @@ function parse(argv) {
   }
   const missing = [...required].filter((name) => values[name] === undefined);
   if (missing.length > 0) {
-    throw new VerificationError('USAGE', `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`);
+    throw new VerificationError(
+      'USAGE',
+      `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`,
+    );
   }
   return values;
 }
@@ -50,10 +47,14 @@ try {
   process.stdout.write(`${JSON.stringify({ ...result.verified, manifest: result.manifest })}\n`);
 } catch (error) {
   if (error instanceof VerificationError) {
-    process.stderr.write(`${JSON.stringify({ ok: false, code: error.code, message: error.message })}\n`);
+    process.stderr.write(
+      `${JSON.stringify({ ok: false, code: error.code, message: error.message })}\n`,
+    );
     process.exitCode = error.code === 'USAGE' ? 64 : 2;
   } else {
-    process.stderr.write(`${JSON.stringify({ ok: false, code: 'INTERNAL_ERROR', message: String(error) })}\n`);
+    process.stderr.write(
+      `${JSON.stringify({ ok: false, code: 'INTERNAL_ERROR', message: String(error) })}\n`,
+    );
     process.exitCode = 70;
   }
 }
