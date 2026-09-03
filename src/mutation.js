@@ -8,9 +8,17 @@ import {
   assertObject,
   assertString,
   assertUniqueStrings,
+  canonicalBytes,
   canonicalize,
   sha256Hex,
 } from './canonical.js';
+import {
+  MUTATION_V21_SCHEMA,
+  finalizeMutationReportSetV21,
+  validateMutationContractV21,
+  verifyMutationReportSetV21,
+} from './mutation-v21.js';
+import { readRootRelativeRegularFile } from './safe-path.js';
 
 const PACKAGE_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/u;
 const PORTABLE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)(?!.*\0)[^/]+(?:\/[^/]+)*$/u;
@@ -433,7 +441,7 @@ function validatePackageContract(entry, label) {
  * closed for every mutation report-set version this verifier does not implement.
  */
 export function mutationContractVersion(kind, label = 'mutation output contract') {
-  if (typeof kind !== 'string' || !MUTATION_SET_KIND.test(kind)) return undefined;
+  if (typeof kind !== 'string' || !kind.startsWith('mutation-')) return undefined;
   if (kind === CONTRACT_V1) return 1;
   if (kind === CONTRACT_V2) return 2;
   throw new VerificationError(
@@ -475,6 +483,10 @@ function validateContractRoster(contract, label) {
 }
 
 export function validateMutationContract(contract, label) {
+  if (contract?.kind === CONTRACT_V2 && contract?.schemaVersion === MUTATION_V21_SCHEMA) {
+    validateMutationContractV21(contract, label);
+    return;
+  }
   if (mutationContractVersion(contract?.kind, label) === 2) {
     assertExactKeys(
       contract,
@@ -786,6 +798,31 @@ function validateEvidenceBinding(entry, expectedRef, fresh, index) {
 
 export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   validateMutationContract(contract, 'mutation output contract');
+  if (contract.schemaVersion === MUTATION_V21_SCHEMA) {
+    return verifyMutationReportSetV21(
+      contract,
+      (path, label) => {
+        const raw = readRootRelativeRegularFile(artifactsDir, path, label);
+        validateArtifactContent({
+          bytes: raw,
+          path,
+          mediaType: 'application/json',
+        });
+        let value;
+        try {
+          value = JSON.parse(raw.toString('utf8'));
+        } catch {
+          throw new VerificationError('MUTATION_REPORT_INVALID', `${label} is not valid JSON`);
+        }
+        const bytes = canonicalBytes(value);
+        if (!raw.equals(bytes) && !raw.equals(Buffer.concat([bytes, Buffer.from('\n')]))) {
+          throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
+        }
+        return { value, bytes };
+      },
+      options,
+    );
+  }
   const version = mutationContractVersion(contract.kind, 'mutation output contract');
   const inspect = (path) => (version === 2 ? path : undefined);
   const summaryFile = readCanonicalJson(
@@ -980,4 +1017,4 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   };
 }
 
-export { EVIDENCE_REF_KIND, MUTANT_STATUSES };
+export { EVIDENCE_REF_KIND, MUTANT_STATUSES, finalizeMutationReportSetV21 };

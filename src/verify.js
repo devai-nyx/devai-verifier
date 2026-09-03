@@ -17,6 +17,7 @@ import {
   validateMutationContract,
   verifyMutationReportSet,
 } from './mutation.js';
+import { readAbsoluteRegularFile, readRootRelativeRegularFile } from './safe-path.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -98,18 +99,27 @@ function validateTaskPolicy(policy) {
 }
 
 function validateTrustStore(trust) {
-  assertExactKeys(trust, ['revokedSignerIds', 'schemaVersion', 'trustedSigners'], 'trust store');
-  if (trust.schemaVersion !== '1.0.0') {
+  const v11 = trust?.schemaVersion === '1.1.0';
+  assertExactKeys(
+    trust,
+    v11
+      ? ['revokedKeyIds', 'revokedSignerIds', 'schemaVersion', 'trustedSigners', 'trustRootId']
+      : ['revokedSignerIds', 'schemaVersion', 'trustedSigners'],
+    'trust store',
+  );
+  if (trust.schemaVersion !== '1.0.0' && !v11) {
     throw new VerificationError('SCHEMA_INVALID', 'unsupported trust-store schemaVersion');
   }
+  if (v11) assertString(trust.trustRootId, 'trust store trustRootId', IDENTIFIER);
   if (!Array.isArray(trust.trustedSigners) || trust.trustedSigners.length === 0) {
     throw new VerificationError('SCHEMA_INVALID', 'trustedSigners must be nonempty');
   }
   const signerIds = [];
   for (const [index, signer] of trust.trustedSigners.entries()) {
     const label = `trustedSigners[${index}]`;
-    assertExactKeys(signer, ['publicKeyPem', 'signerId'], label);
+    assertExactKeys(signer, v11 ? ['keyId', 'publicKeyPem', 'signerId'] : ['publicKeyPem', 'signerId'], label);
     assertString(signer.signerId, `${label}.signerId`, IDENTIFIER);
+    if (v11) assertString(signer.keyId, `${label}.keyId`, IDENTIFIER);
     assertString(signer.publicKeyPem, `${label}.publicKeyPem`);
     let key;
     try {
@@ -127,6 +137,11 @@ function validateTrustStore(trust) {
   }
   assertUniqueStrings(signerIds, 'trusted signer IDs');
   assertUniqueStrings(trust.revokedSignerIds, 'revokedSignerIds');
+  if (v11) {
+    assertUniqueStrings(trust.revokedKeyIds, 'revokedKeyIds');
+    const keyIds = trust.trustedSigners.map((entry) => entry.keyId);
+    assertUniqueStrings(keyIds, 'trusted key IDs');
+  }
 }
 
 function validateEnvelope(envelope) {
@@ -316,7 +331,10 @@ function verifyArtifacts(
   }
   const policyById = new Map(policy.requiredNodes.map((node) => [node.nodeId, node]));
   for (const [nodeId, result] of results) {
-    const paths = policyById.get(nodeId).outputContract.paths ?? [];
+    const outputContract = policyById.get(nodeId).outputContract;
+    const paths = outputContract.paths ?? [];
+    const mutationV21 =
+      outputContract.kind === 'mutation-report-set-v2' && outputContract.schemaVersion === '2.1.0';
     const expectedOutputNames = ['stderr', 'stdout', ...paths].sort();
     const actualOutputNames = Object.keys(result.outputDigests).sort();
     if (
@@ -329,6 +347,21 @@ function verifyArtifacts(
       );
     }
     for (const path of paths) {
+      if (mutationV21) {
+        const bytes = readRootRelativeRegularFile(artifactsDir, path, `artifact ${path}`);
+        validateArtifactContent({
+          bytes,
+          path,
+          mediaType: artifactMediaType(path),
+        });
+        if (result.outputDigests[path] !== sha256Hex(bytes)) {
+          throw new VerificationError(
+            'ARTIFACT_DIGEST_MISMATCH',
+            `artifact ${path} digest does not match`,
+          );
+        }
+        continue;
+      }
       const absolute = resolve(artifactsDir, path);
       const fromRoot = relative(resolve(artifactsDir), absolute);
       if (fromRoot.startsWith(`..${sep}`) || fromRoot === '..') {
@@ -366,7 +399,10 @@ function verifyArtifacts(
     if (mutationContractVersion(node.outputContract.kind) === undefined) continue;
     mutation.push({
       nodeId: node.nodeId,
-      ...verifyMutationReportSet(node.outputContract, artifactsDir, candidate),
+      ...verifyMutationReportSet(node.outputContract, artifactsDir, {
+        ...candidate,
+        releaseUnit: policy.repositoryId,
+      }),
     });
   }
   return { paths: expectedPaths, mutation };
@@ -418,6 +454,7 @@ function verifyValidatedCandidateReceipt({
   artifactsDir,
   signerId,
   allowAdditionalArtifactFiles = false,
+  expectedResultDigests,
 }) {
   validateReceipt(receipt);
   if (receipt.repository.id !== expectedRepository) {
@@ -441,6 +478,19 @@ function verifyValidatedCandidateReceipt({
 
   const expectedById = new Map(taskPolicy.requiredNodes.map((node) => [node.nodeId, node]));
   const receiptById = new Map(receipt.tasks.map((task) => [task.nodeId, task]));
+  if (expectedResultDigests !== undefined) {
+    const expectedResults = [...expectedResultDigests].sort();
+    const receiptResults = receipt.tasks.map((task) => task.resultDigest).sort();
+    if (
+      expectedResults.length !== receiptResults.length ||
+      expectedResults.some((digest, index) => digest !== receiptResults[index])
+    ) {
+      throw new VerificationError(
+        'RESULT_SET_MISMATCH',
+        'signed receipt and manifest task-result populations differ',
+      );
+    }
+  }
   const expectedIds = [...expectedById.keys()].sort();
   const receiptIds = [...receiptById.keys()].sort();
   if (
@@ -568,6 +618,11 @@ export function verifyCandidateEvidence({
   expectedPolicyDigest,
   bindingMode = 'exact-commit',
   artifactsDir,
+  expectedSignerId,
+  expectedTrustRootId,
+  expectedTrustStoreDigest,
+  expectedKeyId,
+  expectedResultDigests,
 }) {
   const context = {
     resultsDir,
@@ -578,18 +633,34 @@ export function verifyCandidateEvidence({
     expectedPolicyDigest,
     bindingMode,
     artifactsDir,
+    expectedResultDigests,
   };
   validateVerificationContext(context);
   validateTrustStore(trustStore);
   validateEnvelope(envelope);
 
   const signature = envelope.signatures[0];
+  if (expectedSignerId !== undefined && signature.signerId !== expectedSignerId) {
+    throw new VerificationError('SIGNER_MISMATCH', 'signed envelope signer differs from expected signer');
+  }
+  if (expectedTrustStoreDigest !== undefined && sha256Hex(trustStore) !== expectedTrustStoreDigest) {
+    throw new VerificationError('TRUST_STORE_MISMATCH', 'trust store digest differs from expected digest');
+  }
+  if (expectedTrustRootId !== undefined && trustStore.trustRootId !== expectedTrustRootId) {
+    throw new VerificationError('TRUST_ROOT_MISMATCH', 'trust root differs from expected trust root');
+  }
   if (trustStore.revokedSignerIds.includes(signature.signerId)) {
     throw new VerificationError('SIGNER_REVOKED', `signer ${signature.signerId} is revoked`);
   }
   const signer = trustStore.trustedSigners.find((entry) => entry.signerId === signature.signerId);
   if (signer === undefined) {
     throw new VerificationError('SIGNER_UNTRUSTED', `signer ${signature.signerId} is not trusted`);
+  }
+  if (expectedKeyId !== undefined && signer.keyId !== expectedKeyId) {
+    throw new VerificationError('KEY_MISMATCH', 'trusted signer key differs from expected key');
+  }
+  if (trustStore.revokedKeyIds?.includes(signer.keyId)) {
+    throw new VerificationError('SIGNER_REVOKED', 'signer key is revoked');
   }
 
   const payloadBytes = Buffer.from(envelope.payload, 'base64');
@@ -628,11 +699,19 @@ export function verifyCandidateEvidence({
 }
 
 export function loadAndVerify(options) {
+  let trustStore;
+  try {
+    const bytes = readAbsoluteRegularFile(options.trustStorePath, 'trust store');
+    trustStore = JSON.parse(bytes.toString('utf8'));
+  } catch (error) {
+    if (error instanceof VerificationError) throw error;
+    throw new VerificationError('MALFORMED_JSON', 'trust store is not valid JSON');
+  }
   return verifyCandidateEvidence({
     ...options,
     envelope: readJson(options.envelopePath, 'signed envelope'),
     taskPolicy: readJson(options.taskPolicyPath, 'task policy'),
-    trustStore: readJson(options.trustStorePath, 'trust store'),
+    trustStore,
   });
 }
 

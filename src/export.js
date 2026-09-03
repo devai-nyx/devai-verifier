@@ -23,6 +23,7 @@ import {
   sha256Hex,
 } from './canonical.js';
 import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
+import { mutationContractVersion } from './mutation.js';
 import {
   PAYLOAD_TYPE,
   verifyCandidateEvidence,
@@ -272,6 +273,14 @@ export function preflightCandidateEvidence(options) {
     environment: readEnvironmentMap(controlledEnvironment, 'environment'),
     policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
   });
+  for (const node of built.taskPolicy.requiredNodes) {
+    if (mutationContractVersion(node.outputContract?.kind) === 1) {
+      throw new VerificationError(
+        'MUTATION_VERSION_UNSUPPORTED',
+        'mutation v1 evidence is read-only and cannot be exported',
+      );
+    }
+  }
   const artifactPaths = declaredArtifactPaths(built.taskPolicy);
   for (const path of artifactPaths) {
     const absolute = candidateArtifactPath(repository, path);

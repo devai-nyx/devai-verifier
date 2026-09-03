@@ -129,11 +129,40 @@ export function verifyPreparedBundle({
   expectedCommit,
   expectedTree,
   expectedPolicyDigest,
+  expectedSignerId,
+  expectedTrustRootId,
+  expectedTrustStoreDigest,
+  expectedKeyId,
   bindingMode = 'exact-commit',
 }) {
   const bundle = realpathSync(bundleDir);
   const manifest = canonicalJson(join(bundle, 'manifest.json'), 'evidence manifest');
   validateManifest(manifest);
+  const taskPolicy = canonicalJson(join(bundle, 'task-policy.json'), 'task policy');
+  const requiresV21Expectations = taskPolicy.requiredNodes?.some(
+    (node) =>
+      node.outputContract?.kind === 'mutation-report-set-v2' &&
+      node.outputContract?.schemaVersion === '2.1.0',
+  );
+  if (requiresV21Expectations) {
+    for (const [name, value] of Object.entries({
+      expectedRepository,
+      expectedCommit,
+      expectedTree,
+      expectedPolicyDigest,
+      expectedSignerId,
+      expectedTrustRootId,
+      expectedTrustStoreDigest,
+      expectedKeyId,
+    })) {
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new VerificationError(
+          'MUTATION_OFFLINE_EXPECTATION_MISSING',
+          `${name} is required for mutation v2.1 offline verification`,
+        );
+      }
+    }
+  }
   const repository = expectedRepository ?? manifest.repositoryId;
   const commit = expectedCommit ?? manifest.commit;
   const tree = expectedTree ?? manifest.tree;
@@ -165,7 +194,6 @@ export function verifyPreparedBundle({
     throw new VerificationError('BUNDLE_POPULATION_MISMATCH', 'evidence bundle file population differs');
   }
   const envelope = canonicalJson(join(bundle, 'envelope.json'), 'signed envelope');
-  const taskPolicy = canonicalJson(join(bundle, 'task-policy.json'), 'task policy');
   if (sha256Hex(envelope) !== manifest.envelopeDigest) {
     throw new VerificationError('ENVELOPE_DIGEST_MISMATCH', 'manifest envelope digest differs');
   }
@@ -191,6 +219,11 @@ export function verifyPreparedBundle({
     expectedCommit: commit,
     expectedTree: tree,
     expectedPolicyDigest: policyDigest,
+    expectedSignerId,
+    expectedTrustRootId,
+    expectedTrustStoreDigest,
+    expectedKeyId,
+    expectedResultDigests: manifest.resultDigests,
     bindingMode,
   });
   if (verified.signerId !== manifest.signerId) {
@@ -222,6 +255,14 @@ export function publishCandidateEvidence({
   repo,
   bundleDir,
   trustStorePath,
+  expectedRepository,
+  expectedCommit,
+  expectedTree,
+  expectedPolicyDigest,
+  expectedSignerId,
+  expectedTrustRootId,
+  expectedTrustStoreDigest,
+  expectedKeyId,
   remote = 'origin',
   tagPrefix = TAG_PREFIX,
   workflow = 'devai-local-rc-verify.yml',
@@ -230,7 +271,18 @@ export function publishCandidateEvidence({
   resolveRemoteRepositoryId = githubRepositoryId,
 }) {
   const repository = realpathSync(repo);
-  const { manifest } = verifyPreparedBundle({ bundleDir, trustStorePath });
+  const { manifest } = verifyPreparedBundle({
+    bundleDir,
+    trustStorePath,
+    expectedRepository,
+    expectedCommit,
+    expectedTree,
+    expectedPolicyDigest,
+    expectedSignerId,
+    expectedTrustRootId,
+    expectedTrustStoreDigest,
+    expectedKeyId,
+  });
   if (!tagPrefix.endsWith('/') || !tagPrefix.startsWith('devai-local-evidence/')) {
     throw new VerificationError('TAG_PREFIX_INVALID', 'evidence tag prefix is invalid');
   }

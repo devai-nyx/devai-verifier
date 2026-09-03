@@ -63,6 +63,22 @@ Verification stays pure and offline: `preflightCandidateEvidence` and
 `verifyPreparedBundle` check a v2 report set with no network, and
 `verifyPreparedBundle` needs no candidate checkout or Git remote.
 
+Schema `2.1.0` is the content-addressed mutation-v2 contract. It preserves
+`executed`, `reused`, and `not-required` dispositions; recomputes the complete
+input projection, report/result addresses, five mutation thresholds, all eight
+Stryker status totals, aggregate evidence-set digest, and semantic-receipt
+digest; and treats empty or pending required populations as incomplete rather
+than passed. Its pure finalizer reads only supplied immutable documents and
+opens no process. Legacy v1 evidence remains readable but cannot be exported as
+new evidence. Every other `mutation-*` kind is reserved and rejected.
+
+Offline verification of a `2.1.0` bundle additionally requires all eight
+external identities: repository, commit, tree, task-policy digest, signer ID,
+trust-root ID, trust-store digest, and key ID. A trust-store `1.1.0` document
+binds the latter identities. The verifier rejects symlinks in trust-store and
+mutation-artifact paths and requires the signed receipt, manifest, and supplied
+task-result populations to close exactly.
+
 Declared UTF-8 text and JSON artifacts are also rejected when they contain
 high-confidence credential material, private-key blocks, credential-bearing
 URLs, or workstation-specific absolute paths. Rejections use stable
