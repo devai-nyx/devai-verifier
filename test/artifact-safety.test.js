@@ -95,7 +95,10 @@ describe('portable artifact content safety', () => {
 
   it('rejects invalid UTF-8 and text artifacts beyond the bounded scan limit', () => {
     expectCode('ARTIFACT_INVALID', () =>
-      validateArtifactContent({ bytes: Buffer.from([0xff]), path: 'report.json' }),
+      validateArtifactContent({
+        bytes: Buffer.from([0xff]),
+        path: 'report.json',
+      }),
     );
     expectCode('ARTIFACT_INVALID', () =>
       validateArtifactContent({

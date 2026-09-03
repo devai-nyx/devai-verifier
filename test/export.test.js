@@ -29,7 +29,9 @@ afterEach(() => {
 });
 
 function git(repo, args) {
-  return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  return execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8',
+  }).trim();
 }
 
 function put(path, content) {
@@ -63,7 +65,12 @@ function mutationV2Artifacts(commit, tree) {
     schemaVersion: '1',
     projectRoot: '.',
     thresholds,
-    files: { 'src/core.ts': { language: 'typescript', mutants: [{ id: '0', status: 'Killed' }] } },
+    files: {
+      'src/core.ts': {
+        language: 'typescript',
+        mutants: [{ id: '0', status: 'Killed' }],
+      },
+    },
     testFiles: {},
     config: {},
     framework: { name: 'StrykerJS', branding: {} },
@@ -118,8 +125,16 @@ function mutationV2Artifacts(commit, tree) {
         otherMutationInputTreeEntries: 'identical-mode-type-oid',
         rootManifest: 'source-and-target-identical',
       },
-      sourceRootManifest: { bytes: 512, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
-      targetRootManifest: { bytes: 512, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+      sourceRootManifest: {
+        bytes: 512,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
+      targetRootManifest: {
+        bytes: 512,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
     },
     complete: true,
     passed: true,
@@ -167,7 +182,11 @@ function mutationV2Artifacts(commit, tree) {
       packages: [{ packageName, workspace, reportPath, resultPath, thresholds }],
       paths: [summaryPath, resultPath, reportPath],
     },
-    files: { [reportPath]: report, [resultPath]: packageResult, [summaryPath]: summary },
+    files: {
+      [reportPath]: report,
+      [resultPath]: packageResult,
+      [summaryPath]: summary,
+    },
     statusTotals,
     summary,
   };
@@ -207,7 +226,11 @@ function fixture({
         outputContract: mutation
           ? mutationV2Artifacts('0'.repeat(40), '0'.repeat(40)).contract
           : portable
-            ? { kind: 'files', paths: ['generated.json'], requiredResult: 'pass' }
+            ? {
+                kind: 'files',
+                paths: ['generated.json'],
+                requiredResult: 'pass',
+              }
             : { kind: 'node-test', requiredResult: 'pass' },
       },
     ],
@@ -415,7 +438,10 @@ describe('trusted candidate evidence export', () => {
   it('runs the full verification semantics in preflight without touching the private key', () => {
     for (const privateKeyPath of [absentPrivateKey, invalidPrivateKey]) {
       const state = fixture({ portable: true });
-      const options = { ...exportOptions(state), privateKeyPath: privateKeyPath(state) };
+      const options = {
+        ...exportOptions(state),
+        privateKeyPath: privateKeyPath(state),
+      };
       const preflight = preflightCandidateEvidence(options);
 
       assert.equal(preflight.verified.ok, true);
@@ -549,7 +575,10 @@ describe('trusted candidate evidence export', () => {
     const state = fixture();
     const missingParent = join(state.root, 'missing', 'evidence');
     expectCode('OUTPUT_PARENT_MISSING', () =>
-      preflightCandidateEvidence({ ...exportOptions(state), outputDir: missingParent }),
+      preflightCandidateEvidence({
+        ...exportOptions(state),
+        outputDir: missingParent,
+      }),
     );
     assert.equal(existsSync(missingParent), false);
   });
@@ -574,8 +603,14 @@ describe('trusted candidate evidence export', () => {
   });
 
   it('exports distinct policies for absent and explicitly empty allowlisted environment values', () => {
-    const absent = fixture({ allowlistedEnv: ['CI'], environmentValue: { CI: null } });
-    const empty = fixture({ allowlistedEnv: ['CI'], environmentValue: { CI: '' } });
+    const absent = fixture({
+      allowlistedEnv: ['CI'],
+      environmentValue: { CI: null },
+    });
+    const empty = fixture({
+      allowlistedEnv: ['CI'],
+      environmentValue: { CI: '' },
+    });
 
     const absentResult = exportCandidateEvidence(exportOptions(absent));
     const emptyResult = exportCandidateEvidence(exportOptions(empty));
@@ -590,7 +625,10 @@ describe('trusted candidate evidence export', () => {
     const result = exportCandidateEvidence(exportOptions(state));
     assert.equal(result.ok, true);
     assert.equal(existsSync(join(state.outputDir, 'trust-store.json')), false);
-    assert.equal(readFileSync(join(state.outputDir, 'artifacts/generated.json'), 'utf8'), '{"proof":true}\n');
+    assert.equal(
+      readFileSync(join(state.outputDir, 'artifacts/generated.json'), 'utf8'),
+      '{"proof":true}\n',
+    );
     const manifest = JSON.parse(readFileSync(join(state.outputDir, 'manifest.json'), 'utf8'));
     assert.deepEqual(manifest.artifacts, [
       {
@@ -661,7 +699,9 @@ describe('trusted candidate evidence export', () => {
         summary.baseline.summarySha256 = '/Users/inspector/stynx/mutation/summary.json';
       },
     });
-    expectCode('MUTATION_VERSION_UNSUPPORTED', () => preflightCandidateEvidence(exportOptions(state)));
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () =>
+      preflightCandidateEvidence(exportOptions(state)),
+    );
     assert.equal(existsSync(state.outputDir), false);
   });
 

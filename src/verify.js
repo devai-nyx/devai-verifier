@@ -1,5 +1,5 @@
 import { createPublicKey, verify as verifySignature } from 'node:crypto';
-import { lstatSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { artifactMediaType, validateArtifactContent } from './artifact-safety.js';
 import {
@@ -116,7 +116,11 @@ function validateTrustStore(trust) {
   const signerIds = [];
   for (const [index, signer] of trust.trustedSigners.entries()) {
     const label = `trustedSigners[${index}]`;
-    assertExactKeys(signer, v11 ? ['keyId', 'publicKeyPem', 'signerId'] : ['publicKeyPem', 'signerId'], label);
+    assertExactKeys(
+      signer,
+      v11 ? ['keyId', 'publicKeyPem', 'signerId'] : ['publicKeyPem', 'signerId'],
+      label,
+    );
     assertString(signer.signerId, `${label}.signerId`, IDENTIFIER);
     if (v11) assertString(signer.keyId, `${label}.keyId`, IDENTIFIER);
     assertString(signer.publicKeyPem, `${label}.publicKeyPem`);
@@ -583,7 +587,10 @@ export function verifyCandidateReceiptEvidence({
     bindingMode,
     artifactsDir,
     allowAdditionalArtifactFiles,
-    mutationVerification: { mutationVerificationMode: 'certify', resolveReuseOrigin },
+    mutationVerification: {
+      mutationVerificationMode: 'certify',
+      resolveReuseOrigin,
+    },
   };
   validateVerificationContext(context);
   return verifyValidatedCandidateReceipt({ ...context, receipt });
@@ -628,13 +635,25 @@ export function verifyCandidateEvidence({
 
   const signature = envelope.signatures[0];
   if (expectedSignerId !== undefined && signature.signerId !== expectedSignerId) {
-    throw new VerificationError('SIGNER_MISMATCH', 'signed envelope signer differs from expected signer');
+    throw new VerificationError(
+      'SIGNER_MISMATCH',
+      'signed envelope signer differs from expected signer',
+    );
   }
-  if (expectedTrustStoreDigest !== undefined && sha256Hex(trustStore) !== expectedTrustStoreDigest) {
-    throw new VerificationError('TRUST_STORE_MISMATCH', 'trust store digest differs from expected digest');
+  if (
+    expectedTrustStoreDigest !== undefined &&
+    sha256Hex(trustStore) !== expectedTrustStoreDigest
+  ) {
+    throw new VerificationError(
+      'TRUST_STORE_MISMATCH',
+      'trust store digest differs from expected digest',
+    );
   }
   if (expectedTrustRootId !== undefined && trustStore.trustRootId !== expectedTrustRootId) {
-    throw new VerificationError('TRUST_ROOT_MISMATCH', 'trust root differs from expected trust root');
+    throw new VerificationError(
+      'TRUST_ROOT_MISMATCH',
+      'trust root differs from expected trust root',
+    );
   }
   if (trustStore.revokedSignerIds.includes(signature.signerId)) {
     throw new VerificationError('SIGNER_REVOKED', `signer ${signature.signerId} is revoked`);

@@ -21,11 +21,7 @@ import {
 } from './canonical.js';
 import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
 import { mutationContractVersion } from './mutation.js';
-import {
-  PAYLOAD_TYPE,
-  verifyCandidateEvidence,
-  verifyCandidateReceiptEvidence,
-} from './verify.js';
+import { PAYLOAD_TYPE, verifyCandidateEvidence, verifyCandidateReceiptEvidence } from './verify.js';
 import {
   copyRootRelativeRegularFile,
   readAbsoluteRegularFile,
@@ -253,10 +249,7 @@ export function preflightCandidateEvidence(options) {
     if (
       typeof contract?.kind === 'string' &&
       contract.kind.startsWith('mutation-') &&
-      (
-        mutationContractVersion(contract.kind) !== 2 ||
-        contract.schemaVersion !== '2.1.0'
-      )
+      (mutationContractVersion(contract.kind) !== 2 || contract.schemaVersion !== '2.1.0')
     ) {
       throw new VerificationError(
         'MUTATION_VERSION_UNSUPPORTED',
@@ -386,7 +379,9 @@ export function exportCandidateEvidence(options) {
         artifacts: verified.verifiedArtifacts.map((path) => ({
           path,
           mediaType: artifactMediaType(path),
-          sha256: sha256Hex(readRootRelativeRegularFile(join(staging, 'artifacts'), path, `artifact ${path}`)),
+          sha256: sha256Hex(
+            readRootRelativeRegularFile(join(staging, 'artifacts'), path, `artifact ${path}`),
+          ),
         })),
       }),
     };

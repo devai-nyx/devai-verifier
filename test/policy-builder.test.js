@@ -30,7 +30,9 @@ afterEach(() => {
 });
 
 function git(repo, args) {
-  return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  return execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8',
+  }).trim();
 }
 
 function put(repo, path, content) {
@@ -139,7 +141,11 @@ function descriptor({ fallbackNodeId = 'full', dynamic = true } = {}) {
         mode: 'fixed',
         requiredNodes: ['prepare', 'unit', 'contract', 'full'],
       },
-      { profileId: 'contract-only', mode: 'fixed', requiredNodes: ['contract'] },
+      {
+        profileId: 'contract-only',
+        mode: 'fixed',
+        requiredNodes: ['contract'],
+      },
     ],
   };
 }
@@ -267,13 +273,14 @@ describe('candidate snapshot and affected derivation', () => {
 
     put(state.repo, 'src/a.js', 'export const value = 2;\n');
     const sourceCommit = commit(state.repo, 'change source');
-    const source = build({ repo: state.repo, candidate: sourceCommit, profileId: 'rc' });
+    const source = build({
+      repo: state.repo,
+      candidate: sourceCommit,
+      profileId: 'rc',
+    });
     assert.notEqual(source.taskPolicyDigest, similarlyNamed.taskPolicyDigest);
     assert.notEqual(keyMap(source).get('unit'), keyMap(similarlyNamed).get('unit'));
-    assert.deepEqual(
-      build({ repo: state.repo, candidate: sourceCommit, profileId: 'rc' }),
-      source,
-    );
+    assert.deepEqual(build({ repo: state.repo, candidate: sourceCommit, profileId: 'rc' }), source);
   });
 
   it('ignores harness-only affected changes without selecting the glob fallback', () => {
@@ -290,7 +297,11 @@ describe('candidate snapshot and affected derivation', () => {
     put(state.repo, 'record/proofs/example.json', '{"value":2}\n');
     put(state.repo, 'scratch/example.txt', 'value 2\n');
     const harnessOnly = commit(state.repo, 'change harness-only paths');
-    const ignored = build({ repo: state.repo, base: baseline, candidate: harnessOnly });
+    const ignored = build({
+      repo: state.repo,
+      base: baseline,
+      candidate: harnessOnly,
+    });
     assert.deepEqual(ignored.changedPaths, []);
     assert.deepEqual(
       ignored.taskPolicy.requiredNodes.map((node) => node.nodeId),
@@ -301,7 +312,11 @@ describe('candidate snapshot and affected derivation', () => {
     put(state.repo, 'recording/example.json', '{"value":2}\n');
     put(state.repo, 'scratchpad/example.txt', 'value 2\n');
     const similarlyNamed = commit(state.repo, 'change similarly named paths');
-    const selected = build({ repo: state.repo, base: harnessOnly, candidate: similarlyNamed });
+    const selected = build({
+      repo: state.repo,
+      base: harnessOnly,
+      candidate: similarlyNamed,
+    });
     assert.deepEqual(selected.changedPaths, [
       '.devai/stateful/example.json',
       'recording/example.json',
@@ -319,7 +334,11 @@ describe('candidate snapshot and affected derivation', () => {
       ['tests/helper.js', 'export const fixture = 2;\n', ['prepare', 'unit', 'contract']],
       ['tests/root.test.js', 'export const testCase = 2;\n', ['prepare', 'unit', 'contract']],
       ['config.json', '{"strict":false}\n', ['prepare', 'unit', 'contract']],
-      ['package-lock.json', '{"lockfileVersion":3,"changed":true}\n', ['prepare', 'unit', 'contract']],
+      [
+        'package-lock.json',
+        '{"lockfileVersion":3,"changed":true}\n',
+        ['prepare', 'unit', 'contract'],
+      ],
     ];
     for (const [path, content, expectedNodes] of mutations) {
       const state = repository();
@@ -339,7 +358,11 @@ describe('candidate snapshot and affected derivation', () => {
     const renamed = repository();
     renameSync(join(renamed.repo, 'src/a.js'), join(renamed.repo, 'src/renamed.js'));
     const renamedCandidate = commit(renamed.repo, 'rename source');
-    const renameBuilt = build({ repo: renamed.repo, base: renamed.base, candidate: renamedCandidate });
+    const renameBuilt = build({
+      repo: renamed.repo,
+      base: renamed.base,
+      candidate: renamedCandidate,
+    });
     assert.deepEqual(renameBuilt.changedPaths, ['src/a.js', 'src/renamed.js']);
     assert.deepEqual(
       renameBuilt.taskPolicy.requiredNodes.map((node) => node.nodeId),
@@ -349,7 +372,11 @@ describe('candidate snapshot and affected derivation', () => {
     const deleted = repository();
     unlinkSync(join(deleted.repo, 'tests/helper.js'));
     const deletedCandidate = commit(deleted.repo, 'delete helper');
-    const deleteBuilt = build({ repo: deleted.repo, base: deleted.base, candidate: deletedCandidate });
+    const deleteBuilt = build({
+      repo: deleted.repo,
+      base: deleted.base,
+      candidate: deletedCandidate,
+    });
     assert.deepEqual(deleteBuilt.changedPaths, ['tests/helper.js']);
     assert.deepEqual(
       deleteBuilt.taskPolicy.requiredNodes.map((node) => node.nodeId),
@@ -409,10 +436,18 @@ describe('candidate snapshot and affected derivation', () => {
 describe('reusable task identity', () => {
   it('excludes commit identity and mtimes for an identical tree', () => {
     const state = repository();
-    const first = build({ repo: state.repo, candidate: state.base, profileId: 'rc' });
+    const first = build({
+      repo: state.repo,
+      candidate: state.base,
+      profileId: 'rc',
+    });
     const identicalCommit = commit(state.repo, 'empty successor');
     assert.equal(identicalCommit.tree, state.base.tree);
-    const second = build({ repo: state.repo, candidate: identicalCommit, profileId: 'rc' });
+    const second = build({
+      repo: state.repo,
+      candidate: identicalCommit,
+      profileId: 'rc',
+    });
     assert.deepEqual(second.taskPolicy, first.taskPolicy);
     assert.equal(second.taskPolicyDigest, first.taskPolicyDigest);
   });
@@ -431,7 +466,9 @@ describe('reusable task identity', () => {
       put(state.repo, path, content);
       const candidate = commit(state.repo, `invalidate ${path}`);
       const after = keyMap(build({ repo: state.repo, candidate, profileId: 'rc' }));
-      const changed = [...after.keys()].filter((nodeId) => after.get(nodeId) !== before.get(nodeId));
+      const changed = [...after.keys()].filter(
+        (nodeId) => after.get(nodeId) !== before.get(nodeId),
+      );
       assert.deepEqual(changed, expectedChanged, path);
     }
   });
@@ -440,16 +477,25 @@ describe('reusable task identity', () => {
     const state = repository();
     const baseline = keyMap(build({ repo: state.repo, candidate: state.base, profileId: 'rc' }));
     const variants = [
-      { mutate: (value) => value.tasks[1].argv.push('--test-name-pattern=current') },
+      {
+        mutate: (value) => value.tasks[1].argv.push('--test-name-pattern=current'),
+      },
       { mutate: (value) => (value.tasks[1].cwd = 'src') },
       { mutate: (value) => (value.tasks[1].runner = 'node-test-v2') },
-      { mutate: (value) => (value.tasks[1].outputContract = { kind: 'report' }) },
+      {
+        mutate: (value) => (value.tasks[1].outputContract = { kind: 'report' }),
+      },
     ];
     for (const variant of variants) {
       const policy = descriptor();
       variant.mutate(policy);
       const changed = keyMap(
-        build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy }),
+        build({
+          repo: state.repo,
+          candidate: state.base,
+          profileId: 'rc',
+          policy,
+        }),
       );
       assert.notEqual(changed.get('unit'), baseline.get('unit'));
       assert.notEqual(changed.get('contract'), baseline.get('contract'));
@@ -515,7 +561,10 @@ describe('reusable task identity', () => {
       profileId: 'rc',
       toolchain: {
         ...TOOLCHAIN,
-        'executable:node': JSON.stringify({ path: '/opt/node/bin/node', sha256: 'a'.repeat(64) }),
+        'executable:node': JSON.stringify({
+          path: '/opt/node/bin/node',
+          sha256: 'a'.repeat(64),
+        }),
       },
     });
     const changed = build({
@@ -525,7 +574,10 @@ describe('reusable task identity', () => {
       profileId: 'rc',
       toolchain: {
         ...TOOLCHAIN,
-        'executable:node': JSON.stringify({ path: '/opt/node/bin/node', sha256: 'b'.repeat(64) }),
+        'executable:node': JSON.stringify({
+          path: '/opt/node/bin/node',
+          sha256: 'b'.repeat(64),
+        }),
       },
     });
     assert.notEqual(first.taskPolicyDigest, changed.taskPolicyDigest);
@@ -541,7 +593,10 @@ describe('reusable task identity', () => {
           candidate,
           base: state.base.commit,
           profileId: 'rc',
-          toolchain: { ...TOOLCHAIN, 'executable:node': '{"path":"/opt/node"}' },
+          toolchain: {
+            ...TOOLCHAIN,
+            'executable:node': '{"path":"/opt/node"}',
+          },
         }),
       /executable:node/,
     );
@@ -555,7 +610,12 @@ describe('fail-closed descriptor and Git boundaries', () => {
     const cycle = descriptor();
     cycle.tasks[0].dependencies = ['contract'];
     expectCode('TASK_CYCLE', () =>
-      build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy: cycle }),
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policy: cycle,
+      }),
     );
 
     const unknownDependency = descriptor();
@@ -572,7 +632,12 @@ describe('fail-closed descriptor and Git boundaries', () => {
     const omitted = descriptor();
     omitted.profiles[1].requiredNodes.push('missing');
     expectCode('PROFILE_NODE_UNKNOWN', () =>
-      build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy: omitted }),
+      build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policy: omitted,
+      }),
     );
   });
 
@@ -698,13 +763,19 @@ describe('mutation output discovery', () => {
     put(
       state.repo,
       'packages/core/package.json',
-      JSON.stringify({ name: '@stynx/core', scripts: { stryker: 'stryker run' } }),
+      JSON.stringify({
+        name: '@stynx/core',
+        scripts: { stryker: 'stryker run' },
+      }),
     );
     put(state.repo, 'packages/core/stryker.conf.mjs', 'export default { threshold: 70 }\n');
     put(
       state.repo,
       'packages/plain/package.json',
-      JSON.stringify({ name: '@stynx/plain', scripts: { test: 'node --test' } }),
+      JSON.stringify({
+        name: '@stynx/plain',
+        scripts: { test: 'node --test' },
+      }),
     );
     const first = commit(state.repo, 'one mutation package');
     const firstPolicy = build({
@@ -729,7 +800,10 @@ describe('mutation output discovery', () => {
     put(
       state.repo,
       'packages/extra/package.json',
-      JSON.stringify({ name: '@stynx/extra', scripts: { stryker: 'stryker run' } }),
+      JSON.stringify({
+        name: '@stynx/extra',
+        scripts: { stryker: 'stryker run' },
+      }),
     );
     put(state.repo, 'packages/extra/stryker.config.mjs', 'export default {}\n');
     const second = commit(state.repo, 'two mutation packages');
@@ -757,7 +831,10 @@ describe('mutation output discovery', () => {
     put(
       state.repo,
       'packages/broken/package.json',
-      JSON.stringify({ name: '@stynx/broken', scripts: { stryker: 'stryker run' } }),
+      JSON.stringify({
+        name: '@stynx/broken',
+        scripts: { stryker: 'stryker run' },
+      }),
     );
     const candidate = commit(state.repo, 'broken mutation package');
     expectCode('MUTATION_ROSTER_MISMATCH', () =>

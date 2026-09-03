@@ -1,12 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
@@ -33,11 +26,8 @@ function exec(command, args, options = {}) {
       maxBuffer: 64 * 1024 * 1024,
       ...options,
     }).trim();
-  } catch (error) {
-    throw new VerificationError(
-      'PUBLISH_COMMAND_FAILED',
-      `${command} command failed`,
-    );
+  } catch {
+    throw new VerificationError('PUBLISH_COMMAND_FAILED', `${command} command failed`);
   }
 }
 
@@ -112,7 +102,8 @@ function filesBelow(root, current = root) {
     }
     if (entry.isDirectory()) files.push(...filesBelow(root, absolute));
     else if (entry.isFile()) files.push(relative(root, absolute).split(sep).join('/'));
-    else throw new VerificationError('BUNDLE_INVALID', 'evidence bundle contains a non-regular file');
+    else
+      throw new VerificationError('BUNDLE_INVALID', 'evidence bundle contains a non-regular file');
   }
   return files;
 }
@@ -144,7 +135,9 @@ function validateManifest(manifest) {
   assertString(manifest.taskPolicyDigest, 'manifest taskPolicyDigest', SHA256);
   assertString(manifest.envelopeDigest, 'manifest envelopeDigest', SHA256);
   assertUniqueStrings(manifest.resultDigests, 'manifest resultDigests');
-  manifest.resultDigests.forEach((digest) => assertString(digest, 'manifest result digest', SHA256));
+  manifest.resultDigests.forEach((digest) =>
+    assertString(digest, 'manifest result digest', SHA256),
+  );
   if (!Array.isArray(manifest.artifacts)) {
     throw new VerificationError('SCHEMA_INVALID', 'manifest artifacts must be an array');
   }
@@ -211,7 +204,10 @@ export function verifyPreparedBundle({
   const tree = expectedTree ?? manifest.tree;
   const policyDigest = expectedPolicyDigest ?? manifest.taskPolicyDigest;
   if (manifest.repositoryId !== repository) {
-    throw new VerificationError('REPOSITORY_MISMATCH', 'manifest repository differs from candidate');
+    throw new VerificationError(
+      'REPOSITORY_MISMATCH',
+      'manifest repository differs from candidate',
+    );
   }
   if (bindingMode === 'exact-commit' && manifest.commit !== commit) {
     throw new VerificationError('COMMIT_MISMATCH', 'manifest commit differs from candidate');
@@ -220,7 +216,10 @@ export function verifyPreparedBundle({
     throw new VerificationError('TREE_MISMATCH', 'manifest tree differs from candidate');
   }
   if (manifest.taskPolicyDigest !== policyDigest) {
-    throw new VerificationError('POLICY_DIGEST_MISMATCH', 'manifest policy differs from expected policy');
+    throw new VerificationError(
+      'POLICY_DIGEST_MISMATCH',
+      'manifest policy differs from expected policy',
+    );
   }
   const expectedFiles = [
     'envelope.json',
@@ -234,7 +233,10 @@ export function verifyPreparedBundle({
     actualFiles.length !== expectedFiles.length ||
     actualFiles.some((path, index) => path !== expectedFiles[index])
   ) {
-    throw new VerificationError('BUNDLE_POPULATION_MISMATCH', 'evidence bundle file population differs');
+    throw new VerificationError(
+      'BUNDLE_POPULATION_MISMATCH',
+      'evidence bundle file population differs',
+    );
   }
   const envelopeSnapshot = canonicalJson(bundle, 'envelope.json', 'signed envelope');
   const envelope = envelopeSnapshot.value;
@@ -255,7 +257,10 @@ export function verifyPreparedBundle({
     const bytes = readRootRelativeRegularFile(bundle, path, `artifact ${artifact.path}`);
     const actual = sha256Hex(bytes);
     if (actual !== artifact.sha256) {
-      throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `manifest artifact ${artifact.path} differs`);
+      throw new VerificationError(
+        'ARTIFACT_DIGEST_MISMATCH',
+        `manifest artifact ${artifact.path} differs`,
+      );
     }
     artifactSnapshots.set(path, bytes);
   }
@@ -364,16 +369,16 @@ export function publishCandidateEvidence({
     expectedTrustStoreDigest,
     expectedKeyId,
   });
-  assertMutationWriteBoundary(
-    prepared.taskPolicy,
-    'published',
-  );
+  assertMutationWriteBoundary(prepared.taskPolicy, 'published');
   const { manifest } = prepared;
   if (!tagPrefix.endsWith('/') || !tagPrefix.startsWith('devai-local-evidence/')) {
     throw new VerificationError('TAG_PREFIX_INVALID', 'evidence tag prefix is invalid');
   }
   if (git(repository, ['status', '--porcelain=v1', '--untracked-files=all']) !== '') {
-    throw new VerificationError('DIRTY_CANDIDATE', 'candidate repository must be clean before publication');
+    throw new VerificationError(
+      'DIRTY_CANDIDATE',
+      'candidate repository must be clean before publication',
+    );
   }
   if (git(repository, ['rev-parse', 'HEAD']) !== manifest.commit) {
     throw new VerificationError('COMMIT_MISMATCH', 'candidate HEAD differs from evidence commit');
@@ -419,10 +424,19 @@ export function publishCandidateEvidence({
     ]);
     let published = false;
     if (existing !== '') {
-      git(proofRepo, ['fetch', '--quiet', '--no-tags', remoteUrl, `refs/tags/${tagName}:refs/tags/existing-evidence`]);
+      git(proofRepo, [
+        'fetch',
+        '--quiet',
+        '--no-tags',
+        remoteUrl,
+        `refs/tags/${tagName}:refs/tags/existing-evidence`,
+      ]);
       const existingTree = git(proofRepo, ['rev-parse', 'refs/tags/existing-evidence^{tree}']);
       if (existingTree !== proofTree) {
-        throw new VerificationError('TAG_COLLISION', `evidence tag ${tagName} already contains different bytes`);
+        throw new VerificationError(
+          'TAG_COLLISION',
+          `evidence tag ${tagName} already contains different bytes`,
+        );
       }
     } else {
       git(proofRepo, ['push', remoteUrl, `refs/tags/${tagName}:refs/tags/${tagName}`]);

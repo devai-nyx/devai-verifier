@@ -53,7 +53,12 @@ function signedEnvelope(receipt, privateKey, signerId = 'owner-workstation') {
     schemaVersion: '1.0.0',
     payloadType: PAYLOAD_TYPE,
     payload: payload.toString('base64'),
-    signatures: [{ signerId, signature: sign(null, payload, privateKey).toString('base64') }],
+    signatures: [
+      {
+        signerId,
+        signature: sign(null, payload, privateKey).toString('base64'),
+      },
+    ],
   };
 }
 
@@ -70,14 +75,20 @@ function fixture() {
   };
   const unit = result('unit:core', taskKeys.unit);
   const unitDigest = sha256Hex(unit);
-  const contract = result('contract:cli', taskKeys.contract, { 'unit:core': unitDigest });
+  const contract = result('contract:cli', taskKeys.contract, {
+    'unit:core': unitDigest,
+  });
   const contractDigest = sha256Hex(contract);
   const taskPolicy = {
     schemaVersion: '1.0.0',
     repositoryId: 'devaii',
     requiredNodes: [
       { nodeId: 'unit:core', taskKey: taskKeys.unit, dependencies: [] },
-      { nodeId: 'contract:cli', taskKey: taskKeys.contract, dependencies: ['unit:core'] },
+      {
+        nodeId: 'contract:cli',
+        taskKey: taskKeys.contract,
+        dependencies: ['unit:core'],
+      },
     ],
   };
   const policyDigest = sha256Hex(taskPolicy);
@@ -89,7 +100,11 @@ function fixture() {
     createdAt: NOW,
     tasks: [
       { nodeId: 'unit:core', taskKey: taskKeys.unit, resultDigest: unitDigest },
-      { nodeId: 'contract:cli', taskKey: taskKeys.contract, resultDigest: contractDigest },
+      {
+        nodeId: 'contract:cli',
+        taskKey: taskKeys.contract,
+        resultDigest: contractDigest,
+      },
     ],
   };
   const trustStore = {
@@ -97,7 +112,10 @@ function fixture() {
     trustedSigners: [
       {
         signerId: 'owner-workstation',
-        publicKeyPem: approved.publicKey.export({ type: 'spki', format: 'pem' }),
+        publicKeyPem: approved.publicKey.export({
+          type: 'spki',
+          format: 'pem',
+        }),
       },
     ],
     revokedSignerIds: [],
@@ -276,8 +294,7 @@ function composedEvidenceFixture() {
       canonicalContractBytes: 128,
       canonicalContractSha256: 'f'.repeat(64),
       comparison: {
-        historicalMutationInputTreeEntries:
-          'match-explicit-historical-candidate-mode-type-oid',
+        historicalMutationInputTreeEntries: 'match-explicit-historical-candidate-mode-type-oid',
         otherMutationInputTreeEntries: 'identical-mode-type-oid',
         rootManifest: 'source-and-target-identical',
       },
@@ -322,9 +339,7 @@ function composedEvidenceFixture() {
   const taskPolicy = {
     schemaVersion: '1.1.0',
     repositoryId: 'devaii',
-    requiredNodes: [
-      { nodeId: 'test:mutation', taskKey, dependencies: [], outputContract },
-    ],
+    requiredNodes: [{ nodeId: 'test:mutation', taskKey, dependencies: [], outputContract }],
   };
   const policyDigest = sha256Hex(taskPolicy);
   const receipt = {
@@ -340,7 +355,10 @@ function composedEvidenceFixture() {
     trustedSigners: [
       {
         signerId: 'owner-workstation',
-        publicKeyPem: approved.publicKey.export({ type: 'spki', format: 'pem' }),
+        publicKeyPem: approved.publicKey.export({
+          type: 'spki',
+          format: 'pem',
+        }),
       },
     ],
     revokedSignerIds: [],
@@ -411,7 +429,13 @@ function signedMutationV2Fixture({ extension = 'json', replacement, summarySha25
     files: {
       'src/package-0.ts': {
         language: 'typescript',
-        mutants: [{ id: '0', status: 'Killed', ...(replacement !== undefined && { replacement }) }],
+        mutants: [
+          {
+            id: '0',
+            status: 'Killed',
+            ...(replacement !== undefined && { replacement }),
+          },
+        ],
       },
     },
     testFiles: {},
@@ -468,8 +492,16 @@ function signedMutationV2Fixture({ extension = 'json', replacement, summarySha25
         otherMutationInputTreeEntries: 'identical-mode-type-oid',
         rootManifest: 'source-and-target-identical',
       },
-      sourceRootManifest: { bytes: 100, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
-      targetRootManifest: { bytes: 100, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+      sourceRootManifest: {
+        bytes: 100,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
+      targetRootManifest: {
+        bytes: 100,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
     },
     complete: true,
     passed: true,
@@ -569,7 +601,10 @@ function signedMutationV2Fixture({ extension = 'json', replacement, summarySha25
       trustedSigners: [
         {
           signerId: 'owner-workstation',
-          publicKeyPem: approved.publicKey.export({ type: 'spki', format: 'pem' }),
+          publicKeyPem: approved.publicKey.export({
+            type: 'spki',
+            format: 'pem',
+          }),
         },
       ],
       revokedSignerIds: [],
@@ -812,7 +847,10 @@ describe('candidate-independent evidence verification', () => {
     unlinkSync(contractPath);
     contract.dependencyResultDigests['unit:core'] = '0'.repeat(64);
     contractTask.resultDigest = sha256Hex(contract);
-    writeFileSync(join(dependency.resultsDir, `${contractTask.resultDigest}.json`), JSON.stringify(contract));
+    writeFileSync(
+      join(dependency.resultsDir, `${contractTask.resultDigest}.json`),
+      JSON.stringify(contract),
+    );
     dependency.envelope = signedEnvelope(dependency.receipt, dependency.approved.privateKey);
     expectCode('DEPENDENCY_MISMATCH', () => verify(dependency));
 
@@ -866,21 +904,27 @@ describe('CLI exit contract', () => {
   it('uses exit 0/stdout for PASS and exit 2/stderr for rejection', () => {
     const state = fixture();
     const paths = writeInputs(state);
-    const pass = spawnSync(process.execPath, args(state, paths), { encoding: 'utf8' });
+    const pass = spawnSync(process.execPath, args(state, paths), {
+      encoding: 'utf8',
+    });
     assert.equal(pass.status, 0, pass.stderr);
     assert.equal(pass.stderr, '');
     assert.equal(JSON.parse(pass.stdout).ok, true);
 
     state.envelope.signatures[0].signature = Buffer.from('forged').toString('base64');
     writeFileSync(paths.envelope, JSON.stringify(state.envelope));
-    const rejected = spawnSync(process.execPath, args(state, paths), { encoding: 'utf8' });
+    const rejected = spawnSync(process.execPath, args(state, paths), {
+      encoding: 'utf8',
+    });
     assert.equal(rejected.status, 2);
     assert.equal(rejected.stdout, '');
     assert.equal(JSON.parse(rejected.stderr).code, 'SIGNATURE_INVALID');
   });
 
   it('uses exit 64 for invalid usage', () => {
-    const result = spawnSync(process.execPath, [CLI, '--unknown', 'value'], { encoding: 'utf8' });
+    const result = spawnSync(process.execPath, [CLI, '--unknown', 'value'], {
+      encoding: 'utf8',
+    });
     assert.equal(result.status, 64);
     assert.equal(result.stdout, '');
     assert.equal(JSON.parse(result.stderr).code, 'USAGE');

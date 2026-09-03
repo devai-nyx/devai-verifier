@@ -2,14 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import fs from 'node:fs';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -114,10 +107,7 @@ function inputProjection(packageName, workspace, suffix = 'current') {
     packageName,
     workspace,
     bindings: Object.fromEntries(
-      INPUT_BINDINGS.map((name) => [
-        name,
-        populationBinding(`${packageName}:${name}:${suffix}`),
-      ]),
+      INPUT_BINDINGS.map((name) => [name, populationBinding(`${packageName}:${name}:${suffix}`)]),
     ),
   };
 }
@@ -137,7 +127,11 @@ function reportFor(packageName, thresholds, statuses = ['Killed']) {
     kind: 'mutation-normalized-stryker-report-v2',
     strykerSchemaVersion: '1',
     projectRoot: '.',
-    thresholds: { break: thresholds.break, high: thresholds.high, low: thresholds.low },
+    thresholds: {
+      break: thresholds.break,
+      high: thresholds.high,
+      low: thresholds.low,
+    },
     files: {
       [`src/${stem}.ts`]: {
         language: 'typescript',
@@ -166,12 +160,20 @@ function evidencePackage({
   candidate,
   statuses = ['Killed'],
 }) {
-  const thresholds = { break: 90, high: 100, low: 90, scoreMin: 90, survivedMax: 0 };
+  const thresholds = {
+    break: 90,
+    high: 100,
+    low: 90,
+    scoreMin: 90,
+    survivedMax: 0,
+  };
   const projection = inputProjection(packageName, workspace);
   const inputDigest = framedDigest(INPUT_DOMAIN, projection);
   const report = reportFor(packageName, thresholds, statuses);
   const statusTotals = zeroTotals(
-    Object.fromEntries(statuses.map((status) => [status, statuses.filter((item) => item === status).length])),
+    Object.fromEntries(
+      statuses.map((status) => [status, statuses.filter((item) => item === status).length]),
+    ),
   );
   const score = aggregateMetrics(statusTotals).score;
   const complete = statusTotals.Pending === 0;
@@ -260,9 +262,18 @@ function evidencePackage({
   return { contract, entry, report, result, candidate };
 }
 
-function notRequiredPackage(packageName, workspace, reasonCode = 'no-mutatable-production-surface') {
+function notRequiredPackage(
+  packageName,
+  workspace,
+  reasonCode = 'no-mutatable-production-surface',
+) {
   return {
-    contract: { packageName, workspace, requirement: 'not-required', reasonCode },
+    contract: {
+      packageName,
+      workspace,
+      requirement: 'not-required',
+      reasonCode,
+    },
     entry: {
       packageName,
       workspace,
@@ -346,9 +357,7 @@ function mutationV21Fixture({ dispositions = ['executed', 'reused', 'not-require
     }
     const executed = state.packages.filter((item) => item.entry.disposition === 'executed');
     const reused = state.packages.filter((item) => item.entry.disposition === 'reused');
-    const notRequired = state.packages.filter(
-      (item) => item.entry.disposition === 'not-required',
-    );
+    const notRequired = state.packages.filter((item) => item.entry.disposition === 'not-required');
     const requiredPassed = evidenceEntries.every((item) => item.entry.passed);
     const allNotRequired = evidenceEntries.length === 0;
     const complete = evidenceEntries.every((item) => item.entry.complete);
@@ -421,7 +430,9 @@ function mutationV21Fixture({ dispositions = ['executed', 'reused', 'not-require
       packages: state.packages.map((item) => ({
         packageName: item.entry.packageName,
         disposition: item.entry.disposition,
-        ...(item.contract.requirement === 'required' && { inputDigest: item.entry.inputDigest }),
+        ...(item.contract.requirement === 'required' && {
+          inputDigest: item.entry.inputDigest,
+        }),
         ...(item.contract.requirement === 'required' && {
           reportDigest: item.entry.reportDigest,
           resultDigest: item.entry.resultDigest,
@@ -533,7 +544,10 @@ function trustedReuseResolution(item) {
       },
     ],
     packageResultSetDigest: framedDigest(PACKAGE_RESULT_SET_DOMAIN, [
-      { packageName: item.entry.packageName, resultDigest: item.entry.resultDigest },
+      {
+        packageName: item.entry.packageName,
+        resultDigest: item.entry.resultDigest,
+      },
     ]),
     evidenceSetDigest,
     verdict: 'pass',
@@ -632,7 +646,9 @@ describe('mutation report-set v2.1 immutable contract', () => {
   });
 
   it('keeps an all-not-required composition distinct from pass', () => {
-    const state = mutationV21Fixture({ dispositions: ['not-required', 'not-required'] });
+    const state = mutationV21Fixture({
+      dispositions: ['not-required', 'not-required'],
+    });
     assert.equal(state.summary.passed, false);
     assert.equal(state.summary.aggregate.score, null);
     assertVerification(verifyV21(state), state);
@@ -671,12 +687,16 @@ describe('mutation report-set v2.1 immutable contract', () => {
   it('refuses RuntimeError while preserving CompileError and Ignored as non-scored', () => {
     const accepted = mutationV21Fixture({ dispositions: ['executed'] });
     const acceptedItem = accepted.packages[0];
-    acceptedItem.report = reportFor(acceptedItem.contract.packageName, acceptedItem.contract.thresholds, [
-      'Killed',
-      'CompileError',
-      'Ignored',
-    ]);
-    acceptedItem.result.statusTotals = zeroTotals({ Killed: 1, CompileError: 1, Ignored: 1 });
+    acceptedItem.report = reportFor(
+      acceptedItem.contract.packageName,
+      acceptedItem.contract.thresholds,
+      ['Killed', 'CompileError', 'Ignored'],
+    );
+    acceptedItem.result.statusTotals = zeroTotals({
+      Killed: 1,
+      CompileError: 1,
+      Ignored: 1,
+    });
     acceptedItem.result.targetCensus.totalMutants = 3;
     acceptedItem.entry.statusTotals = acceptedItem.result.statusTotals;
     acceptedItem.entry.targetCensus = acceptedItem.result.targetCensus;
@@ -686,11 +706,15 @@ describe('mutation report-set v2.1 immutable contract', () => {
 
     const rejected = mutationV21Fixture({ dispositions: ['executed'] });
     const rejectedItem = rejected.packages[0];
-    rejectedItem.report = reportFor(rejectedItem.contract.packageName, rejectedItem.contract.thresholds, [
-      'Killed',
-      'RuntimeError',
-    ]);
-    rejectedItem.result.statusTotals = zeroTotals({ Killed: 1, RuntimeError: 1 });
+    rejectedItem.report = reportFor(
+      rejectedItem.contract.packageName,
+      rejectedItem.contract.thresholds,
+      ['Killed', 'RuntimeError'],
+    );
+    rejectedItem.result.statusTotals = zeroTotals({
+      Killed: 1,
+      RuntimeError: 1,
+    });
     rejectedItem.result.targetCensus.totalMutants = 2;
     rejectedItem.result.score = 100;
     rejectedItem.result.passed = false;
@@ -754,7 +778,9 @@ describe('mutation report-set v2.1 immutable contract', () => {
         },
         retargetPaths: false,
       },
-      { mutate: (item) => (item.entry.evidenceRef.inputDigest = '3'.repeat(64)) },
+      {
+        mutate: (item) => (item.entry.evidenceRef.inputDigest = '3'.repeat(64)),
+      },
       { mutate: (item) => (item.entry.inputDigest = '4'.repeat(64)) },
     ];
     for (const attack of attacks) {
@@ -803,7 +829,9 @@ describe('mutation report-set v2.1 immutable contract', () => {
 });
 
 function git(repo, args) {
-  return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  return execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8',
+  }).trim();
 }
 
 function v1ExportFixture() {
@@ -943,20 +971,18 @@ function v1ExportFixture() {
     taskPolicyDigest: built.taskPolicyDigest,
     createdAt: '2026-09-03T00:00:02.000Z',
     tasks: [
-      { nodeId: 'test:mutation', taskKey: taskResult.taskKey, resultDigest: taskResultDigest },
+      {
+        nodeId: 'test:mutation',
+        taskKey: taskResult.taskKey,
+        resultDigest: taskResultDigest,
+      },
     ],
   });
   const keys = generateKeyPairSync('ed25519');
   const privateKeyPath = join(root, 'private.pem');
   const publicKeyPath = join(root, 'public.pem');
-  put(
-    privateKeyPath,
-    keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-  );
-  put(
-    publicKeyPath,
-    keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
-  );
+  put(privateKeyPath, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
+  put(publicKeyPath, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString());
   return {
     repo,
     commit,
@@ -996,7 +1022,9 @@ describe('mutation v1 write boundary', () => {
 function preparedV21Bundle() {
   const root = temporaryDirectory('devai-mutation-v21-bundle-');
   const bundleDir = join(root, 'bundle');
-  const state = mutationV21Fixture({ dispositions: ['executed', 'reused', 'not-required'] });
+  const state = mutationV21Fixture({
+    dispositions: ['executed', 'reused', 'not-required'],
+  });
   const keys = generateKeyPairSync('ed25519');
   const trustStore = {
     schemaVersion: '1.1.0',
@@ -1037,7 +1065,11 @@ function preparedV21Bundle() {
     const bytes = readFileSync(source);
     put(join(bundleDir, 'artifacts', path), bytes.toString('utf8'));
     outputDigests[path] = sha256Hex(bytes);
-    artifacts.push({ path, mediaType: 'application/json', sha256: sha256Hex(bytes) });
+    artifacts.push({
+      path,
+      mediaType: 'application/json',
+      sha256: sha256Hex(bytes),
+    });
   }
   const taskResult = {
     schemaVersion: '1.0.0',
@@ -1100,7 +1132,15 @@ function preparedV21Bundle() {
     expectedTrustStoreDigest: sha256Hex(trustStore),
     expectedKeyId: KEY_ID,
   };
-  return { root, bundleDir, trustStorePath, trustStore, state, expected, resultDigest };
+  return {
+    root,
+    bundleDir,
+    trustStorePath,
+    trustStore,
+    state,
+    expected,
+    resultDigest,
+  };
 }
 
 describe('mutation v2.1 offline closure', () => {
@@ -1117,11 +1157,7 @@ describe('mutation v2.1 offline closure', () => {
 
   it('uses one captured bundle snapshot and never rereads candidate bytes for semantics', () => {
     const fixture = preparedV21Bundle();
-    const candidateArtifact = join(
-      fixture.bundleDir,
-      'artifacts',
-      fixture.state.contract.paths[0],
-    );
+    const candidateArtifact = join(fixture.bundleDir, 'artifacts', fixture.state.contract.paths[0]);
     // Capture order is manifest, policy, envelope, result population, artifact
     // population, then the external trust store. Replace an artifact immediately
     // after that capture phase. The former implementation reread this candidate
@@ -1270,7 +1306,7 @@ describe('pure mutation v2.1 refinalization', () => {
         "const childProcess = require('node:child_process');",
         "const { syncBuiltinESMExports } = require('node:module');",
         "for (const name of ['exec', 'execFile', 'execFileSync', 'spawn', 'spawnSync']) {",
-        "  childProcess[name] = () => { throw new Error(`FORBIDDEN_PROCESS:${name}`); };",
+        '  childProcess[name] = () => { throw new Error(`FORBIDDEN_PROCESS:${name}`); };',
         '}',
         'syncBuiltinESMExports();',
         '',

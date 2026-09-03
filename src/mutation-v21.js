@@ -2,6 +2,7 @@ import {
   VerificationError,
   canonicalBytes,
   canonicalize,
+  containsAsciiControl,
   framedDigest,
   sha256Hex,
 } from './canonical-json.js';
@@ -14,7 +15,9 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?!0+$)(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const MUTANT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const TOOL_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+:-]*$/u;
-const MUTATOR_NAME = /^[^\u0000-\u001f\u007f/\\]+$/u;
+const MUTATOR_NAME = {
+  test: (value) => /^[^/\\]+$/u.test(value) && !containsAsciiControl(value),
+};
 const SIGNAL = /^SIG[A-Z0-9]{1,20}$/u;
 const RECEIPT_ID = /^MSV2-[0-9a-f]{16}$/u;
 
@@ -42,10 +45,7 @@ const STATUSES = [
   'Survived',
   'Timeout',
 ];
-const REASONS = [
-  'no-mutatable-production-surface',
-  'package-excluded-by-approved-release-profile',
-];
+const REASONS = ['no-mutatable-production-surface', 'package-excluded-by-approved-release-profile'];
 
 const DOMAINS = Object.freeze({
   outputContract: 'devai:mutation-output-contract:v2.1',
@@ -96,7 +96,8 @@ function finite(value, label, code = 'MUTATION_REPORT_INVALID') {
 
 function checkedAdd(left, right, label) {
   const result = left + right;
-  if (!Number.isSafeInteger(result)) fail('MUTATION_REPORT_INVALID', `${label} exceeds safe integer range`);
+  if (!Number.isSafeInteger(result))
+    fail('MUTATION_REPORT_INVALID', `${label} exceeds safe integer range`);
   return result;
 }
 
@@ -113,7 +114,7 @@ function validatePortable(path, label, code = 'SCHEMA_INVALID') {
     /^[A-Za-z]:/u.test(path) ||
     path.startsWith('//') ||
     path.includes('\\') ||
-    /[\u0000-\u001f\u007f]/u.test(path)
+    containsAsciiControl(path)
   ) {
     fail(code, `${label} is not a canonical portable path`);
   }
@@ -125,7 +126,8 @@ function validatePortable(path, label, code = 'SCHEMA_INVALID') {
 function validateCandidate(candidate, label) {
   exact(candidate, ['releaseUnit', 'commit', 'tree'], label);
   string(candidate.releaseUnit, `${label}.releaseUnit`);
-  if (candidate.releaseUnit.length > 200) fail('SCHEMA_INVALID', `${label}.releaseUnit is too long`);
+  if (candidate.releaseUnit.length > 200)
+    fail('SCHEMA_INVALID', `${label}.releaseUnit is too long`);
   string(candidate.commit, `${label}.commit`, GIT_OBJECT);
   string(candidate.tree, `${label}.tree`, GIT_OBJECT);
 }
@@ -185,7 +187,9 @@ function validateInputProjection(projection, packageName, workspace, label) {
 }
 
 function validateThresholds(thresholds, label, full = true) {
-  const keys = full ? ['break', 'high', 'low', 'scoreMin', 'survivedMax'] : ['break', 'high', 'low'];
+  const keys = full
+    ? ['break', 'high', 'low', 'scoreMin', 'survivedMax']
+    : ['break', 'high', 'low'];
   exact(thresholds, keys, label, 'MUTATION_THRESHOLD_MISMATCH');
   for (const key of ['break', 'high', 'low', ...(full ? ['scoreMin'] : [])]) {
     finite(thresholds[key], `${label}.${key}`, 'MUTATION_THRESHOLD_MISMATCH');
@@ -196,7 +200,8 @@ function validateThresholds(thresholds, label, full = true) {
   if (thresholds.low > thresholds.high) {
     fail('MUTATION_THRESHOLD_MISMATCH', `${label} ordering is invalid`);
   }
-  if (full) safeCount(thresholds.survivedMax, `${label}.survivedMax`, 'MUTATION_THRESHOLD_MISMATCH');
+  if (full)
+    safeCount(thresholds.survivedMax, `${label}.survivedMax`, 'MUTATION_THRESHOLD_MISMATCH');
 }
 
 function validateStatusTotals(totals, label) {
@@ -236,7 +241,8 @@ function reportMetrics(report, label) {
   validateThresholds(report.thresholds, `${label}.thresholds`, false);
   exact(report.config, [], `${label}.config`, 'MUTATION_REPORT_INVALID');
   exact(report.framework, ['name'], `${label}.framework`, 'MUTATION_REPORT_INVALID');
-  if (report.framework.name !== 'StrykerJS') fail('MUTATION_REPORT_INVALID', `${label}.framework is invalid`);
+  if (report.framework.name !== 'StrykerJS')
+    fail('MUTATION_REPORT_INVALID', `${label}.framework is invalid`);
   object(report.files, `${label}.files`, 'MUTATION_REPORT_INVALID');
   object(report.testFiles, `${label}.testFiles`, 'MUTATION_REPORT_INVALID');
   for (const [path, value] of Object.entries(report.testFiles)) {
@@ -252,7 +258,8 @@ function reportMetrics(report, label) {
     if (file.language !== 'javascript' && file.language !== 'typescript') {
       fail('MUTATION_REPORT_INVALID', `${label}.files.${path}.language is invalid`);
     }
-    if (!Array.isArray(file.mutants)) fail('MUTATION_REPORT_INVALID', `${label} mutants must be an array`);
+    if (!Array.isArray(file.mutants))
+      fail('MUTATION_REPORT_INVALID', `${label} mutants must be an array`);
     for (const mutant of file.mutants) {
       exact(
         mutant,
@@ -262,7 +269,8 @@ function reportMetrics(report, label) {
       );
       string(mutant.id, `${label} mutant.id`, MUTANT_ID, 'MUTATION_REPORT_INVALID');
       const identity = `${path}\0${mutant.id}`;
-      if (mutantIds.has(identity)) fail('MUTATION_REPORT_INVALID', `${label} mutant IDs are duplicated`);
+      if (mutantIds.has(identity))
+        fail('MUTATION_REPORT_INVALID', `${label} mutant IDs are duplicated`);
       mutantIds.add(identity);
       string(
         mutant.mutatorName,
@@ -276,10 +284,20 @@ function reportMetrics(report, label) {
         SHA256,
         'MUTATION_REPORT_INVALID',
       );
-      exact(mutant.location, ['start', 'end'], `${label} mutant.location`, 'MUTATION_REPORT_INVALID');
+      exact(
+        mutant.location,
+        ['start', 'end'],
+        `${label} mutant.location`,
+        'MUTATION_REPORT_INVALID',
+      );
       for (const position of ['start', 'end']) {
         const point = mutant.location[position];
-        exact(point, ['line', 'column'], `${label} mutant.location.${position}`, 'MUTATION_REPORT_INVALID');
+        exact(
+          point,
+          ['line', 'column'],
+          `${label} mutant.location.${position}`,
+          'MUTATION_REPORT_INVALID',
+        );
         if (!Number.isSafeInteger(point.line) || point.line < 1) {
           fail('MUTATION_REPORT_INVALID', `${label} mutant line is invalid`);
         }
@@ -287,7 +305,8 @@ function reportMetrics(report, label) {
           fail('MUTATION_REPORT_INVALID', `${label} mutant column is invalid`);
         }
       }
-      if (!STATUSES.includes(mutant.status)) fail('MUTATION_REPORT_INVALID', `${label} mutant status is invalid`);
+      if (!STATUSES.includes(mutant.status))
+        fail('MUTATION_REPORT_INVALID', `${label} mutant status is invalid`);
       totals[mutant.status] = checkedAdd(totals[mutant.status], 1, `${label}.${mutant.status}`);
     }
   }
@@ -303,14 +322,24 @@ function reportMetrics(report, label) {
     `${label}.scored`,
   );
   const score = scored === 0 ? 100 : (detected / scored) * 100;
-  return { totals, detected, scored, score, targetCensus: { targetFileCount, totalMutants } };
+  return {
+    totals,
+    detected,
+    scored,
+    score,
+    targetCensus: { targetFileCount, totalMutants },
+  };
 }
 
 function validateProcess(process, label) {
   exact(process, ['errorAbsent', 'signal', 'status'], label, 'MUTATION_REPORT_INVALID');
   boolean(process.errorAbsent, `${label}.errorAbsent`, 'MUTATION_REPORT_INVALID');
-  if (process.signal !== null) string(process.signal, `${label}.signal`, SIGNAL, 'MUTATION_REPORT_INVALID');
-  if (process.status !== null && (!Number.isSafeInteger(process.status) || process.status < 0 || process.status > 255)) {
+  if (process.signal !== null)
+    string(process.signal, `${label}.signal`, SIGNAL, 'MUTATION_REPORT_INVALID');
+  if (
+    process.status !== null &&
+    (!Number.isSafeInteger(process.status) || process.status < 0 || process.status > 255)
+  ) {
     fail('MUTATION_REPORT_INVALID', `${label}.status is invalid`);
   }
 }
@@ -327,10 +356,25 @@ function validateToolVersions(versions, label) {
 }
 
 function validateReuseOrigin(origin, label) {
-  exact(origin, ['candidate', 'semanticReceiptDigest', 'evidenceSetDigest'], label, 'MUTATION_ORIGIN_MISMATCH');
+  exact(
+    origin,
+    ['candidate', 'semanticReceiptDigest', 'evidenceSetDigest'],
+    label,
+    'MUTATION_ORIGIN_MISMATCH',
+  );
   validateCandidate(origin.candidate, `${label}.candidate`);
-  string(origin.semanticReceiptDigest, `${label}.semanticReceiptDigest`, SHA256, 'MUTATION_ORIGIN_MISMATCH');
-  string(origin.evidenceSetDigest, `${label}.evidenceSetDigest`, SHA256, 'MUTATION_ORIGIN_MISMATCH');
+  string(
+    origin.semanticReceiptDigest,
+    `${label}.semanticReceiptDigest`,
+    SHA256,
+    'MUTATION_ORIGIN_MISMATCH',
+  );
+  string(
+    origin.evidenceSetDigest,
+    `${label}.evidenceSetDigest`,
+    SHA256,
+    'MUTATION_ORIGIN_MISMATCH',
+  );
 }
 
 function denyReuse(message) {
@@ -365,7 +409,16 @@ function validateTrustedReuseOrigin(origin, entry, options) {
   const receipt = resolved.semanticReceipt;
   exact(
     composition,
-    ['schemaVersion', 'kind', 'candidate', 'complete', 'verdict', 'passed', 'packages', 'aggregate'],
+    [
+      'schemaVersion',
+      'kind',
+      'candidate',
+      'complete',
+      'verdict',
+      'passed',
+      'packages',
+      'aggregate',
+    ],
     `${entry.packageName} origin composition`,
     'MUTATION_REUSE_DENIED',
   );
@@ -405,7 +458,9 @@ function validateTrustedReuseOrigin(origin, entry, options) {
   ) {
     denyReuse(`${entry.packageName} reused origin evidence set differs`);
   }
-  const originIndex = composition.packages.findIndex((candidate) => candidate?.packageName === entry.packageName);
+  const originIndex = composition.packages.findIndex(
+    (candidate) => candidate?.packageName === entry.packageName,
+  );
   if (originIndex < 0) denyReuse(`${entry.packageName} reused origin package is absent`);
   const originEntry = composition.packages[originIndex];
   exact(
@@ -482,13 +537,43 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     denyReuse(`${entry.packageName} reused origin receipt differs`);
   }
   try {
-    string(receipt.receiptId, `${entry.packageName} origin receiptId`, RECEIPT_ID, 'MUTATION_REUSE_DENIED');
+    string(
+      receipt.receiptId,
+      `${entry.packageName} origin receiptId`,
+      RECEIPT_ID,
+      'MUTATION_REUSE_DENIED',
+    );
     validateProvenance(receipt.verifierProvenance);
-    string(receipt.outputContractDigest, `${entry.packageName} origin output contract`, SHA256, 'MUTATION_REUSE_DENIED');
-    string(receipt.releasePlanReceiptDigest, `${entry.packageName} origin plan receipt`, SHA256, 'MUTATION_REUSE_DENIED');
-    string(receipt.releaseProfileDigest, `${entry.packageName} origin profile`, SHA256, 'MUTATION_REUSE_DENIED');
-    string(receipt.policyDigest, `${entry.packageName} origin policy`, SHA256, 'MUTATION_REUSE_DENIED');
-    string(receipt.packageResultSetDigest, `${entry.packageName} origin result set`, SHA256, 'MUTATION_REUSE_DENIED');
+    string(
+      receipt.outputContractDigest,
+      `${entry.packageName} origin output contract`,
+      SHA256,
+      'MUTATION_REUSE_DENIED',
+    );
+    string(
+      receipt.releasePlanReceiptDigest,
+      `${entry.packageName} origin plan receipt`,
+      SHA256,
+      'MUTATION_REUSE_DENIED',
+    );
+    string(
+      receipt.releaseProfileDigest,
+      `${entry.packageName} origin profile`,
+      SHA256,
+      'MUTATION_REUSE_DENIED',
+    );
+    string(
+      receipt.policyDigest,
+      `${entry.packageName} origin policy`,
+      SHA256,
+      'MUTATION_REUSE_DENIED',
+    );
+    string(
+      receipt.packageResultSetDigest,
+      `${entry.packageName} origin result set`,
+      SHA256,
+      'MUTATION_REUSE_DENIED',
+    );
     const { receiptDigest, ...withoutDigest } = receipt;
     if (framedDigest(DOMAINS.semanticReceipt, withoutDigest) !== receiptDigest) {
       denyReuse(`${entry.packageName} reused origin receipt digest differs`);
@@ -520,13 +605,17 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     originReceiptEntry.inputDigest !== entry.inputDigest ||
     originReceiptEntry.reportDigest !== entry.reportDigest ||
     originReceiptEntry.resultDigest !== entry.resultDigest ||
-    originReceiptEntry.compositionEntryDigest !== framedDigest(DOMAINS.compositionEntry, originEntry)
+    originReceiptEntry.compositionEntryDigest !==
+      framedDigest(DOMAINS.compositionEntry, originEntry)
   ) {
     denyReuse(`${entry.packageName} reused origin receipt package differs`);
   }
   const resultSet = composition.packages
     .filter((candidate) => candidate?.requirement === 'required')
-    .map((candidate) => ({ packageName: candidate.packageName, resultDigest: candidate.resultDigest }));
+    .map((candidate) => ({
+      packageName: candidate.packageName,
+      resultDigest: candidate.resultDigest,
+    }));
   if (receipt.packageResultSetDigest !== framedDigest(DOMAINS.packageResultSet, resultSet)) {
     denyReuse(`${entry.packageName} reused origin result set differs`);
   }
@@ -544,10 +633,7 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
   const label = `mutation result ${contractEntry.packageName}`;
   const result = material.result;
   const report = material.report;
-  if (
-    result?.kind === 'mutation-package-result-v1' ||
-    result?.schemaVersion === '1.0.0'
-  ) {
+  if (result?.kind === 'mutation-package-result-v1' || result?.schemaVersion === '1.0.0') {
     if (disposition === 'reused') fail('MUTATION_REUSE_DENIED', `${label} is legacy evidence`);
     fail('MUTATION_VERSION_UNSUPPORTED', `${label} is legacy evidence`);
   }
@@ -573,10 +659,16 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
     label,
     'MUTATION_REPORT_INVALID',
   );
-  if (result.schemaVersion !== MUTATION_V21_SCHEMA || result.kind !== 'mutation-package-result-v2') {
+  if (
+    result.schemaVersion !== MUTATION_V21_SCHEMA ||
+    result.kind !== 'mutation-package-result-v2'
+  ) {
     fail('MUTATION_VERSION_UNSUPPORTED', `${label} declares an unsupported version`);
   }
-  if (result.packageName !== contractEntry.packageName || result.workspace !== contractEntry.workspace) {
+  if (
+    result.packageName !== contractEntry.packageName ||
+    result.workspace !== contractEntry.workspace
+  ) {
     fail('MUTATION_ROSTER_MISMATCH', `${label} package identity differs`);
   }
   validateInputProjection(
@@ -597,7 +689,12 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
   validateProcess(result.process, `${label}.process`);
   validateThresholds(result.thresholds, `${label}.thresholds`);
   validateStatusTotals(result.statusTotals, `${label}.statusTotals`);
-  exact(result.targetCensus, ['targetFileCount', 'totalMutants'], `${label}.targetCensus`, 'MUTATION_REPORT_INVALID');
+  exact(
+    result.targetCensus,
+    ['targetFileCount', 'totalMutants'],
+    `${label}.targetCensus`,
+    'MUTATION_REPORT_INVALID',
+  );
   safeCount(result.targetCensus.targetFileCount, `${label}.targetCensus.targetFileCount`);
   safeCount(result.targetCensus.totalMutants, `${label}.targetCensus.totalMutants`);
   finite(result.score, `${label}.score`);
@@ -612,8 +709,14 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
     fail('ARTIFACT_DIGEST_MISMATCH', `${label} report digest differs`);
   }
   const paths = artifactPaths(recomputedInputDigest, reportDigest, resultDigest);
-  if (contractEntry.reportPath !== paths.reportPath || contractEntry.resultPath !== paths.resultPath) {
-    fail('MUTATION_INPUT_DIGEST_MISMATCH', `${label} store address differs from its input identity`);
+  if (
+    contractEntry.reportPath !== paths.reportPath ||
+    contractEntry.resultPath !== paths.resultPath
+  ) {
+    fail(
+      'MUTATION_INPUT_DIGEST_MISMATCH',
+      `${label} store address differs from its input identity`,
+    );
   }
   if (
     canonicalize(result.thresholds) !== canonicalize(contractEntry.thresholds) ||
@@ -635,7 +738,9 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
   }
 
   const processSuccessful =
-    result.process.errorAbsent === true && result.process.signal === null && result.process.status === 0;
+    result.process.errorAbsent === true &&
+    result.process.signal === null &&
+    result.process.status === 0;
   const complete =
     processSuccessful &&
     metrics.totals.Pending === 0 &&
@@ -697,7 +802,12 @@ function validateRequiredContract(entry, label) {
   validatePortable(entry.reportPath, `${label}.reportPath`);
   validatePortable(entry.resultPath, `${label}.resultPath`);
   if (entry.requirement !== 'required') fail('SCHEMA_INVALID', `${label}.requirement is invalid`);
-  validateInputProjection(entry.inputProjection, entry.packageName, entry.workspace, `${label}.inputProjection`);
+  validateInputProjection(
+    entry.inputProjection,
+    entry.packageName,
+    entry.workspace,
+    `${label}.inputProjection`,
+  );
   string(entry.inputDigest, `${label}.inputDigest`, SHA256, 'MUTATION_INPUT_DIGEST_MISMATCH');
   if (entry.inputDigest !== framedDigest(DOMAINS.input, entry.inputProjection)) {
     fail('MUTATION_INPUT_DIGEST_MISMATCH', `${label}.inputDigest differs from its projection`);
@@ -764,7 +874,8 @@ export function validateMutationContractV21(contract, label = 'mutation output c
     workspaces.add(entry.workspace);
   }
   if (!Array.isArray(contract.paths)) fail('SCHEMA_INVALID', `${label}.paths must be an array`);
-  for (const [index, path] of contract.paths.entries()) validatePortable(path, `${label}.paths[${index}]`);
+  for (const [index, path] of contract.paths.entries())
+    validatePortable(path, `${label}.paths[${index}]`);
   if (new Set(contract.paths).size !== contract.paths.length) {
     fail('MUTATION_ROSTER_MISMATCH', `${label}.paths contains duplicates`);
   }
@@ -821,7 +932,10 @@ function evidenceEntry(contractEntry, material, enforcePassing) {
 
 function notRequiredEntry(contractEntry, material) {
   if (material.disposition !== 'not-required' || material.reasonCode !== contractEntry.reasonCode) {
-    fail('MUTATION_NOT_REQUIRED_MISMATCH', `${contractEntry.packageName} not-required decision differs`);
+    fail(
+      'MUTATION_NOT_REQUIRED_MISMATCH',
+      `${contractEntry.packageName} not-required decision differs`,
+    );
   }
   return {
     packageName: contractEntry.packageName,
@@ -868,7 +982,11 @@ function finalizeMutationReportSet(input, enforcePassing) {
     }
   }
   const required = packages.filter((entry) => entry.requirement === 'required');
-  const detected = checkedAdd(statusTotals.Killed, statusTotals.Timeout, 'mutation aggregate detected');
+  const detected = checkedAdd(
+    statusTotals.Killed,
+    statusTotals.Timeout,
+    'mutation aggregate detected',
+  );
   const scored = checkedAdd(
     checkedAdd(detected, statusTotals.Survived, 'mutation aggregate scored'),
     statusTotals.NoCoverage,
@@ -876,7 +994,8 @@ function finalizeMutationReportSet(input, enforcePassing) {
   );
   const complete = required.every((entry) => entry.complete);
   const passed = required.length > 0 && complete && required.every((entry) => entry.passed);
-  const verdict = required.length === 0 ? 'not-applicable' : !complete ? 'unknown' : passed ? 'pass' : 'fail';
+  const verdict =
+    required.length === 0 ? 'not-applicable' : !complete ? 'unknown' : passed ? 'pass' : 'fail';
   const score = required.length === 0 || scored === 0 ? null : (detected / scored) * 100;
   const evidenceSetDigest = framedDigest(DOMAINS.composition, packages);
   return {
@@ -891,7 +1010,8 @@ function finalizeMutationReportSet(input, enforcePassing) {
       packageCount: packages.length,
       executedPackageCount: packages.filter((entry) => entry.disposition === 'executed').length,
       reusedPackageCount: packages.filter((entry) => entry.disposition === 'reused').length,
-      notRequiredPackageCount: packages.filter((entry) => entry.disposition === 'not-required').length,
+      notRequiredPackageCount: packages.filter((entry) => entry.disposition === 'not-required')
+        .length,
       score,
       statusTotals,
       verdict,
@@ -908,7 +1028,10 @@ export function finalizeMutationReportSetV21(input) {
 function validateSummaryEntryIdentity(contractEntry, entry, result) {
   if (contractEntry.requirement === 'not-required') {
     if (entry?.reasonCode !== contractEntry.reasonCode) {
-      fail('MUTATION_NOT_REQUIRED_MISMATCH', `${contractEntry.packageName} not-required decision differs`);
+      fail(
+        'MUTATION_NOT_REQUIRED_MISMATCH',
+        `${contractEntry.packageName} not-required decision differs`,
+      );
     }
     return;
   }
@@ -926,7 +1049,12 @@ function validateSummaryEntryIdentity(contractEntry, entry, result) {
 }
 
 function validateProvenance(value) {
-  exact(value, ['source', 'vendor', 'byteEquality'], 'mutation verifier provenance', 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
+  exact(
+    value,
+    ['source', 'vendor', 'byteEquality'],
+    'mutation verifier provenance',
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
   exact(
     value.source,
     ['repository', 'commit', 'tree', 'byteSetDigest'],
@@ -942,14 +1070,44 @@ function validateProvenance(value) {
   if (value.source.repository !== 'devai-verifier' || value.byteEquality !== true) {
     fail('MUTATION_VENDOR_PROVENANCE_MISMATCH', 'mutation verifier provenance is invalid');
   }
-  for (const key of ['commit', 'tree']) string(value.source[key], `source.${key}`, GIT_OBJECT, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
-  string(value.source.byteSetDigest, 'source.byteSetDigest', SHA256, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
+  for (const key of ['commit', 'tree'])
+    string(value.source[key], `source.${key}`, GIT_OBJECT, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
+  string(
+    value.source.byteSetDigest,
+    'source.byteSetDigest',
+    SHA256,
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
   validatePortable(value.vendor.root, 'vendor.root', 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
-  validatePortable(value.vendor.manifestPath, 'vendor.manifestPath', 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
-  string(value.vendor.manifestDigest, 'vendor.manifestDigest', SHA256, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
-  string(value.vendor.sourceCommit, 'vendor.sourceCommit', GIT_OBJECT, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
-  string(value.vendor.sourceTree, 'vendor.sourceTree', GIT_OBJECT, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
-  string(value.vendor.byteSetDigest, 'vendor.byteSetDigest', SHA256, 'MUTATION_VENDOR_PROVENANCE_MISMATCH');
+  validatePortable(
+    value.vendor.manifestPath,
+    'vendor.manifestPath',
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
+  string(
+    value.vendor.manifestDigest,
+    'vendor.manifestDigest',
+    SHA256,
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
+  string(
+    value.vendor.sourceCommit,
+    'vendor.sourceCommit',
+    GIT_OBJECT,
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
+  string(
+    value.vendor.sourceTree,
+    'vendor.sourceTree',
+    GIT_OBJECT,
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
+  string(
+    value.vendor.byteSetDigest,
+    'vendor.byteSetDigest',
+    SHA256,
+    'MUTATION_VENDOR_PROVENANCE_MISMATCH',
+  );
   if (
     value.source.commit !== value.vendor.sourceCommit ||
     value.source.tree !== value.vendor.sourceTree ||
@@ -989,7 +1147,12 @@ function validateSemanticReceipt(receipt, contract, summary, options) {
   ) {
     fail('MUTATION_VERSION_UNSUPPORTED', 'mutation semantic receipt version is unsupported');
   }
-  string(receipt.receiptId, 'mutation semantic receipt.receiptId', RECEIPT_ID, 'MUTATION_SEMANTIC_RECEIPT_MISMATCH');
+  string(
+    receipt.receiptId,
+    'mutation semantic receipt.receiptId',
+    RECEIPT_ID,
+    'MUTATION_SEMANTIC_RECEIPT_MISMATCH',
+  );
   validateCandidate(receipt.candidate, 'mutation semantic receipt.candidate');
   const expectedCandidate = {
     releaseUnit: options.releaseUnit,
@@ -1011,7 +1174,12 @@ function validateSemanticReceipt(receipt, contract, summary, options) {
     'evidenceSetDigest',
     'receiptDigest',
   ]) {
-    string(receipt[key], `mutation semantic receipt.${key}`, SHA256, 'MUTATION_SEMANTIC_RECEIPT_MISMATCH');
+    string(
+      receipt[key],
+      `mutation semantic receipt.${key}`,
+      SHA256,
+      'MUTATION_SEMANTIC_RECEIPT_MISMATCH',
+    );
   }
   if (
     receipt.outputContractDigest !== framedDigest(DOMAINS.outputContract, contract) ||
@@ -1035,7 +1203,14 @@ function validateSemanticReceipt(receipt, contract, summary, options) {
     exact(
       receiptEntry,
       required
-        ? ['packageName', 'disposition', 'inputDigest', 'reportDigest', 'resultDigest', 'compositionEntryDigest']
+        ? [
+            'packageName',
+            'disposition',
+            'inputDigest',
+            'reportDigest',
+            'resultDigest',
+            'compositionEntryDigest',
+          ]
         : ['packageName', 'disposition', 'compositionEntryDigest'],
       `mutation semantic receipt.packages[${index}]`,
       'MUTATION_SEMANTIC_RECEIPT_MISMATCH',
@@ -1049,7 +1224,10 @@ function validateSemanticReceipt(receipt, contract, summary, options) {
     }
     if (required) {
       if (receiptEntry.inputDigest !== contractEntry.inputDigest) {
-        fail('MUTATION_INPUT_DIGEST_MISMATCH', `${contractEntry.packageName} semantic receipt input differs`);
+        fail(
+          'MUTATION_INPUT_DIGEST_MISMATCH',
+          `${contractEntry.packageName} semantic receipt input differs`,
+        );
       }
       if (
         receiptEntry.reportDigest !== summaryEntry.reportDigest ||
@@ -1104,16 +1282,28 @@ export function verifyMutationReportSetV21(contract, readArtifact, options = {})
   const materials = [];
   for (const [index, contractEntry] of contract.packages.entries()) {
     const summaryEntry = summary.packages[index];
-    if (summaryEntry?.packageName !== contractEntry.packageName || summaryEntry?.workspace !== contractEntry.workspace) {
+    if (
+      summaryEntry?.packageName !== contractEntry.packageName ||
+      summaryEntry?.workspace !== contractEntry.workspace
+    ) {
       fail('MUTATION_ROSTER_MISMATCH', `mutation package ${index} identity differs`);
     }
     if (contractEntry.requirement === 'not-required') {
       validateSummaryEntryIdentity(contractEntry, summaryEntry);
-      materials.push({ disposition: 'not-required', reasonCode: summaryEntry.reasonCode });
+      materials.push({
+        disposition: 'not-required',
+        reasonCode: summaryEntry.reasonCode,
+      });
       continue;
     }
-    const reportFile = readArtifact(contractEntry.reportPath, `mutation report ${contractEntry.packageName}`);
-    const resultFile = readArtifact(contractEntry.resultPath, `mutation result ${contractEntry.packageName}`);
+    const reportFile = readArtifact(
+      contractEntry.reportPath,
+      `mutation report ${contractEntry.packageName}`,
+    );
+    const resultFile = readArtifact(
+      contractEntry.resultPath,
+      `mutation result ${contractEntry.packageName}`,
+    );
     validateSummaryEntryIdentity(contractEntry, summaryEntry, resultFile.value);
     materials.push({
       disposition: summaryEntry.disposition,
@@ -1123,15 +1313,18 @@ export function verifyMutationReportSetV21(contract, readArtifact, options = {})
     });
   }
 
-  const expectedSummary = finalizeMutationReportSet({
-    contract,
-    candidate: {
-      releaseUnit: options.releaseUnit,
-      commit: options.candidateCommit,
-      tree: options.candidateTree,
+  const expectedSummary = finalizeMutationReportSet(
+    {
+      contract,
+      candidate: {
+        releaseUnit: options.releaseUnit,
+        commit: options.candidateCommit,
+        tree: options.candidateTree,
+      },
+      packages: materials,
     },
-    packages: materials,
-  }, true);
+    true,
+  );
   for (const entry of expectedSummary.packages) {
     if (entry.requirement === 'required' && entry.disposition === 'reused') {
       validateTrustedReuseOrigin(entry.origin, entry, verificationOptions);
@@ -1162,4 +1355,8 @@ export function verifyMutationReportSetV21(contract, readArtifact, options = {})
   };
 }
 
-export { DOMAINS as MUTATION_V21_DIGEST_DOMAINS, INPUT_BINDINGS, STATUSES as MUTATION_V21_STATUSES };
+export {
+  DOMAINS as MUTATION_V21_DIGEST_DOMAINS,
+  INPUT_BINDINGS,
+  STATUSES as MUTATION_V21_STATUSES,
+};

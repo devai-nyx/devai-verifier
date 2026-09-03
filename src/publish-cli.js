@@ -34,7 +34,10 @@ function parse(argv) {
   }
   const missing = [...required].filter((name) => values[name] === undefined);
   if (missing.length > 0) {
-    throw new VerificationError('USAGE', `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`);
+    throw new VerificationError(
+      'USAGE',
+      `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`,
+    );
   }
   return values;
 }
@@ -61,10 +64,14 @@ try {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   if (error instanceof VerificationError) {
-    process.stderr.write(`${JSON.stringify({ ok: false, code: error.code, message: error.message })}\n`);
+    process.stderr.write(
+      `${JSON.stringify({ ok: false, code: error.code, message: error.message })}\n`,
+    );
     process.exitCode = error.code === 'USAGE' ? 64 : 2;
   } else {
-    process.stderr.write(`${JSON.stringify({ ok: false, code: 'INTERNAL_ERROR', message: String(error) })}\n`);
+    process.stderr.write(
+      `${JSON.stringify({ ok: false, code: 'INTERNAL_ERROR', message: String(error) })}\n`,
+    );
     process.exitCode = 70;
   }
 }

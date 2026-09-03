@@ -35,7 +35,10 @@ function parseArguments(argv) {
   }
   const missing = [...names].filter((name) => values[name] === undefined);
   if (missing.length > 0) {
-    throw new VerificationError('USAGE', `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`);
+    throw new VerificationError(
+      'USAGE',
+      `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`,
+    );
   }
   return values;
 }

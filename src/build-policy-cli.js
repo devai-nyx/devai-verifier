@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 import { VerificationError, canonicalize, readJson } from './canonical.js';
-import {
-  buildExpectedTaskPolicy,
-  readEnvironmentMap,
-  readStringMap,
-} from './policy-builder.js';
+import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
 
 const requiredNames = new Set([
   'repo',
@@ -35,7 +31,10 @@ function parseArguments(argv) {
   }
   const missing = [...requiredNames].filter((name) => values[name] === undefined);
   if (missing.length > 0) {
-    throw new VerificationError('USAGE', `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`);
+    throw new VerificationError(
+      'USAGE',
+      `missing arguments: ${missing.map((name) => `--${name}`).join(', ')}`,
+    );
   }
   return values;
 }
@@ -58,7 +57,9 @@ try {
     environment: readEnvironmentMap(values.environment, 'environment'),
     policySchemaVersion: values['schema-version'] ?? '1.0.0',
   });
-  writeFileSync(values.output, `${canonicalize(built.taskPolicy)}\n`, { flag: 'wx' });
+  writeFileSync(values.output, `${canonicalize(built.taskPolicy)}\n`, {
+    flag: 'wx',
+  });
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
