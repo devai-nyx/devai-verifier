@@ -513,6 +513,22 @@ describe('protected evidence publication', () => {
       verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
     );
   });
+
+  for (const [_name, replacement] of [
+    ['null policy', null],
+    ['non-array requiredNodes', { requiredNodes: null }],
+    ['null requiredNodes member', { requiredNodes: [null] }],
+  ]) {
+    it(`rejects a malformed canonical task policy as SCHEMA_INVALID before v2.1 inspection: ${_name}`, () => {
+      const state = fixture();
+      const policyPath = join(state.bundle, 'task-policy.json');
+      const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+      put(policyPath, replacement === null ? replacement : { ...policy, ...replacement });
+      expectCode('SCHEMA_INVALID', () =>
+        verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
+      );
+    });
+  }
 });
 
 describe('offline mutation-report-set-v2 bundle verification', () => {
