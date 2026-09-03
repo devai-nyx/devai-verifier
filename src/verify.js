@@ -46,7 +46,7 @@ function validateOutputContract(contract, label) {
   }
 }
 
-function validateTaskPolicy(policy) {
+export function validateTaskPolicy(policy) {
   assertExactKeys(policy, ['repositoryId', 'requiredNodes', 'schemaVersion'], 'task policy');
   if (policy.schemaVersion !== '1.0.0' && policy.schemaVersion !== '1.1.0') {
     throw new VerificationError('SCHEMA_INVALID', 'unsupported task-policy schemaVersion');

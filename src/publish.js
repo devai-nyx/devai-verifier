@@ -19,7 +19,7 @@ import {
 } from './canonical.js';
 import { mutationContractVersion } from './mutation.js';
 import { readAbsoluteRegularFile, readRootRelativeRegularFile } from './safe-path.js';
-import { verifyCandidateEvidence } from './verify.js';
+import { validateTaskPolicy, verifyCandidateEvidence } from './verify.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -181,6 +181,7 @@ export function verifyPreparedBundle({
   validateManifest(manifest);
   const taskPolicySnapshot = canonicalJson(bundle, 'task-policy.json', 'task policy');
   const taskPolicy = taskPolicySnapshot.value;
+  validateTaskPolicy(taskPolicy);
   const requiresV21Expectations = taskPolicy.requiredNodes?.some(
     (node) =>
       node.outputContract?.kind === 'mutation-report-set-v2' &&
