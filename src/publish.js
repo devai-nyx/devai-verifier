@@ -258,6 +258,15 @@ export function verifyPreparedBundle({
     }
     artifactSnapshots.set(path, bytes);
   }
+  // Retain every candidate-controlled byte that determines the published proof.
+  // Publication must never reopen the source bundle after this point.
+  const capturedFiles = new Map([
+    ['manifest.json', manifestSnapshot.bytes],
+    ['task-policy.json', taskPolicySnapshot.bytes],
+    ['envelope.json', envelopeSnapshot.bytes],
+    ...resultSnapshots,
+    ...artifactSnapshots,
+  ]);
   const trustStore = readExternalJson(trustStorePath, 'trust store').value;
   const snapshot = mkdtempSync(join(tmpdir(), 'devai-evidence-verify-'));
   let verified;
@@ -289,7 +298,7 @@ export function verifyPreparedBundle({
   if (verified.signerId !== manifest.signerId) {
     throw new VerificationError('SIGNER_MISMATCH', 'manifest signer differs from signed envelope');
   }
-  return { manifest, taskPolicy, verified, bundle };
+  return { manifest, taskPolicy, verified, bundle, capturedFiles };
 }
 
 /**
@@ -298,21 +307,9 @@ export function verifyPreparedBundle({
  * member is opened through the identity-pinned reader.  This also makes the
  * proof repository independent of files that appear after verification.
  */
-function materializeVerifiedBundle(bundle, manifest, destination) {
-  const paths = [
-    'envelope.json',
-    'manifest.json',
-    'task-policy.json',
-    ...manifest.resultDigests.map((digest) => `results/${digest}.json`),
-    ...manifest.artifacts.map((artifact) => `artifacts/${artifact.path}`),
-  ];
+function materializeVerifiedBundle(capturedFiles, destination) {
   mkdirSync(destination, { recursive: false });
-  for (const path of paths) {
-    const bytes = readRootRelativeRegularFile(bundle, path, `bundle member ${path}`);
-    const target = join(destination, path);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, bytes, { flag: 'wx' });
-  }
+  for (const [path, bytes] of capturedFiles) writeSnapshotFile(destination, path, bytes);
 }
 
 function githubRepositoryId(remoteUrl) {
@@ -392,7 +389,7 @@ export function publishCandidateEvidence({
   const temporary = mkdtempSync(join(tmpdir(), 'devai-evidence-publish-'));
   try {
     const proofRepo = join(temporary, 'proof');
-    materializeVerifiedBundle(prepared.bundle, manifest, proofRepo);
+    materializeVerifiedBundle(prepared.capturedFiles, proofRepo);
     verifyPreparedBundle({
       bundleDir: proofRepo,
       trustStorePath,

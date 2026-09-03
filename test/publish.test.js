@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import fs from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -410,6 +412,43 @@ describe('protected evidence publication', () => {
     assert.equal(second.published, false);
     assert.equal(dispatched.length, 2);
     assert.equal(dispatched[0].candidateCommit, state.commit);
+  });
+
+  it('publishes the captured snapshot when the source bundle changes after verification', () => {
+    const state = fixture();
+    const sourceArtifact = join(state.bundle, 'artifacts', 'generated.json');
+    const capturedBytes = Buffer.from('{"proof":true}\n');
+    // verifyPreparedBundle reads manifest, policy, envelope, result, artifact,
+    // then trust store. Switch the source immediately after capture. The former
+    // publication handoff reread this path while building proof and would either
+    // reject or tag B; the proof must contain the captured A bytes.
+    const captureReadCount = 6;
+    const originalReadFileSync = fs.readFileSync;
+    let reads = 0;
+    let substituted = false;
+    fs.readFileSync = (...args) => {
+      const bytes = originalReadFileSync(...args);
+      reads += 1;
+      if (reads === captureReadCount) {
+        writeFileSync(sourceArtifact, '{"proof":false}\n');
+        substituted = true;
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      const published = publishCandidateEvidence(options(state, []));
+      assert.equal(substituted, true);
+      assert.equal(published.published, true);
+      const taggedArtifact = execFileSync(
+        'git',
+        ['-C', state.remote, 'show', `${published.tag}:artifacts/generated.json`],
+      );
+      assert.deepEqual(taggedArtifact, capturedBytes);
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+      syncBuiltinESMExports();
+    }
   });
 
   it('accepts a byte-identical merged-main tree only in exact-tree mode', () => {
