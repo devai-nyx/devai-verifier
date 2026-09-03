@@ -18,8 +18,8 @@ import {
   sha256Hex,
 } from './canonical.js';
 import { mutationContractVersion } from './mutation.js';
-import { readRootRelativeRegularFile } from './safe-path.js';
-import { loadAndVerify } from './verify.js';
+import { readAbsoluteRegularFile, readRootRelativeRegularFile } from './safe-path.js';
+import { verifyCandidateEvidence } from './verify.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -58,7 +58,8 @@ function validatePortablePath(path, label) {
 }
 
 function canonicalJson(root, path, label) {
-  const text = readRootRelativeRegularFile(root, path, label).toString('utf8');
+  const bytes = readRootRelativeRegularFile(root, path, label);
+  const text = bytes.toString('utf8');
   let value;
   try {
     value = JSON.parse(text);
@@ -68,7 +69,22 @@ function canonicalJson(root, path, label) {
   if (text !== canonicalize(value) && text !== `${canonicalize(value)}\n`) {
     throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
   }
-  return value;
+  return { bytes, value };
+}
+
+function readExternalJson(path, label) {
+  const bytes = readAbsoluteRegularFile(path, label);
+  try {
+    return { bytes, value: JSON.parse(bytes.toString('utf8')) };
+  } catch {
+    throw new VerificationError('MALFORMED_JSON', `${label} is not valid JSON`);
+  }
+}
+
+function writeSnapshotFile(root, path, bytes) {
+  const target = join(root, path);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, bytes, { flag: 'wx' });
 }
 
 export function assertMutationWriteBoundary(taskPolicy, action = 'published') {
@@ -160,9 +176,11 @@ export function verifyPreparedBundle({
   // Do not canonicalize the supplied directory: realpath would silently follow
   // a bundle-root symlink before the identity-pinned readers can reject it.
   const bundle = resolve(bundleDir);
-  const manifest = canonicalJson(bundle, 'manifest.json', 'evidence manifest');
+  const manifestSnapshot = canonicalJson(bundle, 'manifest.json', 'evidence manifest');
+  const manifest = manifestSnapshot.value;
   validateManifest(manifest);
-  const taskPolicy = canonicalJson(bundle, 'task-policy.json', 'task policy');
+  const taskPolicySnapshot = canonicalJson(bundle, 'task-policy.json', 'task policy');
+  const taskPolicy = taskPolicySnapshot.value;
   const requiresV21Expectations = taskPolicy.requiredNodes?.some(
     (node) =>
       node.outputContract?.kind === 'mutation-report-set-v2' &&
@@ -217,45 +235,61 @@ export function verifyPreparedBundle({
   ) {
     throw new VerificationError('BUNDLE_POPULATION_MISMATCH', 'evidence bundle file population differs');
   }
-  const envelope = canonicalJson(bundle, 'envelope.json', 'signed envelope');
+  const envelopeSnapshot = canonicalJson(bundle, 'envelope.json', 'signed envelope');
+  const envelope = envelopeSnapshot.value;
   if (sha256Hex(envelope) !== manifest.envelopeDigest) {
     throw new VerificationError('ENVELOPE_DIGEST_MISMATCH', 'manifest envelope digest differs');
   }
   if (sha256Hex(taskPolicy) !== manifest.taskPolicyDigest) {
     throw new VerificationError('POLICY_DIGEST_MISMATCH', 'manifest task-policy digest differs');
   }
+  const resultSnapshots = new Map();
   for (const digest of manifest.resultDigests) {
-    canonicalJson(bundle, `results/${digest}.json`, `task result ${digest}`);
+    const path = `results/${digest}.json`;
+    resultSnapshots.set(path, canonicalJson(bundle, path, `task result ${digest}`).bytes);
   }
+  const artifactSnapshots = new Map();
   for (const artifact of manifest.artifacts) {
-    const actual = sha256Hex(
-      readRootRelativeRegularFile(bundle, `artifacts/${artifact.path}`, `artifact ${artifact.path}`),
-    );
+    const path = `artifacts/${artifact.path}`;
+    const bytes = readRootRelativeRegularFile(bundle, path, `artifact ${artifact.path}`);
+    const actual = sha256Hex(bytes);
     if (actual !== artifact.sha256) {
       throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `manifest artifact ${artifact.path} differs`);
     }
+    artifactSnapshots.set(path, bytes);
   }
-  const verified = loadAndVerify({
-    envelopePath: join(bundle, 'envelope.json'),
-    resultsDir: join(bundle, 'results'),
-    artifactsDir: join(bundle, 'artifacts'),
-    taskPolicyPath: join(bundle, 'task-policy.json'),
-    trustStorePath,
-    expectedRepository: repository,
-    expectedCommit: commit,
-    expectedTree: tree,
-    expectedPolicyDigest: policyDigest,
-    expectedSignerId,
-    expectedTrustRootId,
-    expectedTrustStoreDigest,
-    expectedKeyId,
-    expectedResultDigests: manifest.resultDigests,
-    bindingMode,
-  });
+  const trustStore = readExternalJson(trustStorePath, 'trust store').value;
+  const snapshot = mkdtempSync(join(tmpdir(), 'devai-evidence-verify-'));
+  let verified;
+  try {
+    writeSnapshotFile(snapshot, 'envelope.json', envelopeSnapshot.bytes);
+    writeSnapshotFile(snapshot, 'task-policy.json', taskPolicySnapshot.bytes);
+    for (const [path, bytes] of resultSnapshots) writeSnapshotFile(snapshot, path, bytes);
+    for (const [path, bytes] of artifactSnapshots) writeSnapshotFile(snapshot, path, bytes);
+    verified = verifyCandidateEvidence({
+      envelope,
+      resultsDir: join(snapshot, 'results'),
+      artifactsDir: join(snapshot, 'artifacts'),
+      taskPolicy,
+      trustStore,
+      expectedRepository: repository,
+      expectedCommit: commit,
+      expectedTree: tree,
+      expectedPolicyDigest: policyDigest,
+      expectedSignerId,
+      expectedTrustRootId,
+      expectedTrustStoreDigest,
+      expectedKeyId,
+      expectedResultDigests: manifest.resultDigests,
+      bindingMode,
+    });
+  } finally {
+    rmSync(snapshot, { recursive: true, force: true });
+  }
   if (verified.signerId !== manifest.signerId) {
     throw new VerificationError('SIGNER_MISMATCH', 'manifest signer differs from signed envelope');
   }
-  return { manifest, verified, bundle };
+  return { manifest, taskPolicy, verified, bundle };
 }
 
 /**
@@ -333,7 +367,7 @@ export function publishCandidateEvidence({
     expectedKeyId,
   });
   assertMutationWriteBoundary(
-    canonicalJson(prepared.bundle, 'task-policy.json', 'task policy'),
+    prepared.taskPolicy,
     'published',
   );
   const { manifest } = prepared;

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import fs from 'node:fs';
 import {
   mkdirSync,
   mkdtempSync,
@@ -10,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { canonicalBytes, canonicalize, sha256Hex } from '../src/canonical.js';
@@ -1111,6 +1113,46 @@ describe('mutation v2.1 offline closure', () => {
     });
     assert.equal(result.verified.verifiedMutation[0].nodeId, 'test:mutation');
     assertVerification(result.verified.verifiedMutation[0], fixture.state);
+  });
+
+  it('uses one captured bundle snapshot and never rereads candidate bytes for semantics', () => {
+    const fixture = preparedV21Bundle();
+    const candidateArtifact = join(
+      fixture.bundleDir,
+      'artifacts',
+      fixture.state.contract.paths[0],
+    );
+    // Capture order is manifest, policy, envelope, result population, artifact
+    // population, then the external trust store. Replace an artifact immediately
+    // after that capture phase. The former implementation reread this candidate
+    // path through loadAndVerify and therefore rejected; snapshot verification must
+    // succeed because its semantic kernel sees only the captured bytes.
+    const captureReadCount = 5 + fixture.state.contract.paths.length;
+    const originalReadFileSync = fs.readFileSync;
+    let reads = 0;
+    let substituted = false;
+    fs.readFileSync = (...args) => {
+      const bytes = originalReadFileSync(...args);
+      reads += 1;
+      if (reads === captureReadCount) {
+        writeFileSync(candidateArtifact, '{"substituted":true}\n');
+        substituted = true;
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      const result = verifyPreparedBundle({
+        bundleDir: fixture.bundleDir,
+        trustStorePath: fixture.trustStorePath,
+        ...fixture.expected,
+      });
+      assert.equal(result.verified.ok, true);
+      assert.equal(substituted, true);
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+      syncBuiltinESMExports();
+    }
   });
 
   it('refuses every missing external identity before trusting bundle-provided defaults', () => {
