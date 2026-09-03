@@ -1,23 +1,24 @@
 import { execFileSync } from 'node:child_process';
 import {
-  cpSync,
+  mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
   VerificationError,
   assertExactKeys,
   assertString,
   assertUniqueStrings,
   canonicalize,
-  readJson,
   sha256Hex,
 } from './canonical.js';
+import { mutationContractVersion } from './mutation.js';
+import { readRootRelativeRegularFile } from './safe-path.js';
 import { loadAndVerify } from './verify.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -35,7 +36,7 @@ function exec(command, args, options = {}) {
   } catch (error) {
     throw new VerificationError(
       'PUBLISH_COMMAND_FAILED',
-      `${command} ${args[0] ?? ''} failed: ${error.message}`,
+      `${command} command failed`,
     );
   }
 }
@@ -56,13 +57,34 @@ function validatePortablePath(path, label) {
   }
 }
 
-function canonicalJson(path, label) {
-  const value = readJson(path, label);
-  const text = readFileSync(path, 'utf8');
+function canonicalJson(root, path, label) {
+  const text = readRootRelativeRegularFile(root, path, label).toString('utf8');
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new VerificationError('MALFORMED_JSON', `${label} is not valid JSON`);
+  }
   if (text !== canonicalize(value) && text !== `${canonicalize(value)}\n`) {
     throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
   }
   return value;
+}
+
+export function assertMutationWriteBoundary(taskPolicy, action = 'published') {
+  for (const node of taskPolicy.requiredNodes ?? []) {
+    const contract = node?.outputContract;
+    if (typeof contract?.kind !== 'string' || !contract.kind.startsWith('mutation-')) continue;
+    if (
+      mutationContractVersion(contract.kind, 'mutation output contract') !== 2 ||
+      contract.schemaVersion !== '2.1.0'
+    ) {
+      throw new VerificationError(
+        'MUTATION_VERSION_UNSUPPORTED',
+        `legacy mutation evidence is read-only and cannot be ${action}`,
+      );
+    }
+  }
 }
 
 function filesBelow(root, current = root) {
@@ -135,10 +157,12 @@ export function verifyPreparedBundle({
   expectedKeyId,
   bindingMode = 'exact-commit',
 }) {
-  const bundle = realpathSync(bundleDir);
-  const manifest = canonicalJson(join(bundle, 'manifest.json'), 'evidence manifest');
+  // Do not canonicalize the supplied directory: realpath would silently follow
+  // a bundle-root symlink before the identity-pinned readers can reject it.
+  const bundle = resolve(bundleDir);
+  const manifest = canonicalJson(bundle, 'manifest.json', 'evidence manifest');
   validateManifest(manifest);
-  const taskPolicy = canonicalJson(join(bundle, 'task-policy.json'), 'task policy');
+  const taskPolicy = canonicalJson(bundle, 'task-policy.json', 'task policy');
   const requiresV21Expectations = taskPolicy.requiredNodes?.some(
     (node) =>
       node.outputContract?.kind === 'mutation-report-set-v2' &&
@@ -193,7 +217,7 @@ export function verifyPreparedBundle({
   ) {
     throw new VerificationError('BUNDLE_POPULATION_MISMATCH', 'evidence bundle file population differs');
   }
-  const envelope = canonicalJson(join(bundle, 'envelope.json'), 'signed envelope');
+  const envelope = canonicalJson(bundle, 'envelope.json', 'signed envelope');
   if (sha256Hex(envelope) !== manifest.envelopeDigest) {
     throw new VerificationError('ENVELOPE_DIGEST_MISMATCH', 'manifest envelope digest differs');
   }
@@ -201,10 +225,12 @@ export function verifyPreparedBundle({
     throw new VerificationError('POLICY_DIGEST_MISMATCH', 'manifest task-policy digest differs');
   }
   for (const digest of manifest.resultDigests) {
-    canonicalJson(join(bundle, 'results', `${digest}.json`), `task result ${digest}`);
+    canonicalJson(bundle, `results/${digest}.json`, `task result ${digest}`);
   }
   for (const artifact of manifest.artifacts) {
-    const actual = sha256Hex(readFileSync(join(bundle, 'artifacts', artifact.path)));
+    const actual = sha256Hex(
+      readRootRelativeRegularFile(bundle, `artifacts/${artifact.path}`, `artifact ${artifact.path}`),
+    );
     if (actual !== artifact.sha256) {
       throw new VerificationError('ARTIFACT_DIGEST_MISMATCH', `manifest artifact ${artifact.path} differs`);
     }
@@ -230,6 +256,29 @@ export function verifyPreparedBundle({
     throw new VerificationError('SIGNER_MISMATCH', 'manifest signer differs from signed envelope');
   }
   return { manifest, verified, bundle };
+}
+
+/**
+ * Materialize precisely the population that was just verified.  Do not use a
+ * recursive copy here: a bundle directory is untrusted until every individual
+ * member is opened through the identity-pinned reader.  This also makes the
+ * proof repository independent of files that appear after verification.
+ */
+function materializeVerifiedBundle(bundle, manifest, destination) {
+  const paths = [
+    'envelope.json',
+    'manifest.json',
+    'task-policy.json',
+    ...manifest.resultDigests.map((digest) => `results/${digest}.json`),
+    ...manifest.artifacts.map((artifact) => `artifacts/${artifact.path}`),
+  ];
+  mkdirSync(destination, { recursive: false });
+  for (const path of paths) {
+    const bytes = readRootRelativeRegularFile(bundle, path, `bundle member ${path}`);
+    const target = join(destination, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, bytes, { flag: 'wx' });
+  }
 }
 
 function githubRepositoryId(remoteUrl) {
@@ -271,7 +320,7 @@ export function publishCandidateEvidence({
   resolveRemoteRepositoryId = githubRepositoryId,
 }) {
   const repository = realpathSync(repo);
-  const { manifest } = verifyPreparedBundle({
+  const prepared = verifyPreparedBundle({
     bundleDir,
     trustStorePath,
     expectedRepository,
@@ -283,6 +332,11 @@ export function publishCandidateEvidence({
     expectedTrustStoreDigest,
     expectedKeyId,
   });
+  assertMutationWriteBoundary(
+    canonicalJson(prepared.bundle, 'task-policy.json', 'task policy'),
+    'published',
+  );
+  const { manifest } = prepared;
   if (!tagPrefix.endsWith('/') || !tagPrefix.startsWith('devai-local-evidence/')) {
     throw new VerificationError('TAG_PREFIX_INVALID', 'evidence tag prefix is invalid');
   }
@@ -304,7 +358,19 @@ export function publishCandidateEvidence({
   const temporary = mkdtempSync(join(tmpdir(), 'devai-evidence-publish-'));
   try {
     const proofRepo = join(temporary, 'proof');
-    cpSync(resolve(bundleDir), proofRepo, { recursive: true, dereference: false, errorOnExist: true });
+    materializeVerifiedBundle(prepared.bundle, manifest, proofRepo);
+    verifyPreparedBundle({
+      bundleDir: proofRepo,
+      trustStorePath,
+      expectedRepository,
+      expectedCommit,
+      expectedTree,
+      expectedPolicyDigest,
+      expectedSignerId,
+      expectedTrustRootId,
+      expectedTrustStoreDigest,
+      expectedKeyId,
+    });
     git(proofRepo, ['init', '--quiet', '-b', 'evidence']);
     git(proofRepo, ['config', 'user.name', 'DEVAI Inspector Evidence']);
     git(proofRepo, ['config', 'user.email', 'devai-evidence@invalid']);

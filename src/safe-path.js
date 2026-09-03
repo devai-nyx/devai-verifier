@@ -5,6 +5,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, parse, relative, resolve } from 'node:path';
 import { VerificationError } from './canonical-json.js';
@@ -37,45 +38,89 @@ export function validatePortablePathV21(path, label = 'artifact path') {
  * component. Every ancestor is lstat-checked first. Diagnostics deliberately contain
  * only the caller-provided logical label, never a native path or native error string.
  */
-export function readRootRelativeRegularFile(root, path, label) {
+/**
+ * Opens a root-relative regular file without following a final symlink and
+ * rejects ancestor swaps. Node does not expose openat(2), so the portable
+ * implementation snapshots every path component, opens the final component with
+ * O_NOFOLLOW, and proves that the opened descriptor and every ancestor still
+ * have the snapshotted device/inode identity before reading. A swap can therefore
+ * never cause unverified bytes to be accepted or copied.
+ */
+function openRootRelativeRegularFile(root, path, label) {
   validatePortablePathV21(path, `${label} path`);
   const absoluteRoot = resolve(root);
-  let cursor = absoluteRoot;
   const segments = path.split('/');
-  for (let index = 0; index < segments.length; index += 1) {
-    cursor = join(cursor, segments[index]);
-    let stat;
-    try {
-      stat = lstatSync(cursor);
-    } catch {
-      throw new VerificationError('ARTIFACTS_MISSING', `${label} is unavailable`);
-    }
-    if (stat.isSymbolicLink()) {
-      throw new VerificationError('ARTIFACT_SYMLINK_ESCAPE', `${label} traverses a symbolic link`);
-    }
-    if (index < segments.length - 1 && !stat.isDirectory()) {
-      throw new VerificationError('ARTIFACT_INVALID', `${label} ancestor is not a directory`);
-    }
-    if (index === segments.length - 1 && !stat.isFile()) {
-      throw new VerificationError('ARTIFACT_INVALID', `${label} is not a regular file`);
-    }
-  }
-
-  let descriptor;
+  const snapshots = [];
+  let cursor = absoluteRoot;
   try {
-    descriptor = openSync(cursor, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    if (!fstatSync(descriptor).isFile()) {
+    for (let index = -1; index < segments.length; index += 1) {
+      if (index >= 0) cursor = join(cursor, segments[index]);
+      const stat = lstatSync(cursor);
+      if (stat.isSymbolicLink()) {
+        throw new VerificationError('ARTIFACT_SYMLINK_ESCAPE', `${label} traverses a symbolic link`);
+      }
+      if (index < segments.length - 1 && !stat.isDirectory()) {
+        throw new VerificationError('ARTIFACT_INVALID', `${label} ancestor is not a directory`);
+      }
+      if (index === segments.length - 1 && !stat.isFile()) {
+        throw new VerificationError('ARTIFACT_INVALID', `${label} is not a regular file`);
+      }
+      snapshots.push({ path: cursor, dev: stat.dev, ino: stat.ino });
+    }
+    const descriptor = openSync(
+      cursor,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const opened = fstatSync(descriptor);
+    const expected = snapshots.at(-1);
+    if (!opened.isFile()) {
+      closeSync(descriptor);
       throw new VerificationError('ARTIFACT_INVALID', `${label} is not a regular file`);
     }
-    return readFileSync(descriptor);
+    if (opened.dev !== expected.dev || opened.ino !== expected.ino) {
+      closeSync(descriptor);
+      throw new VerificationError('ARTIFACT_RACE_DETECTED', `${label} changed during safe access`);
+    }
+    for (const snapshot of snapshots) {
+      const current = lstatSync(snapshot.path);
+      if (
+        current.isSymbolicLink() ||
+        current.dev !== snapshot.dev ||
+        current.ino !== snapshot.ino
+      ) {
+        closeSync(descriptor);
+        throw new VerificationError('ARTIFACT_RACE_DETECTED', `${label} changed during safe access`);
+      }
+    }
+    return descriptor;
   } catch (error) {
     if (error instanceof VerificationError) throw error;
     if (error?.code === 'ELOOP') {
       throw new VerificationError('ARTIFACT_SYMLINK_ESCAPE', `${label} traverses a symbolic link`);
     }
+    throw new VerificationError('ARTIFACTS_MISSING', `${label} is unavailable`);
+  }
+}
+
+export function readRootRelativeRegularFile(root, path, label) {
+  let descriptor;
+  try {
+    descriptor = openRootRelativeRegularFile(root, path, label);
+    return readFileSync(descriptor);
+  } catch (error) {
+    if (error instanceof VerificationError) throw error;
     throw new VerificationError('ARTIFACTS_MISSING', `${label} is unreadable`);
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+export function copyRootRelativeRegularFile(root, path, destination, label) {
+  const bytes = readRootRelativeRegularFile(root, path, label);
+  try {
+    writeFileSync(destination, bytes, { flag: 'wx' });
+  } catch {
+    throw new VerificationError('ARTIFACT_COPY_FAILED', `${label} could not be staged`);
   }
 }
 

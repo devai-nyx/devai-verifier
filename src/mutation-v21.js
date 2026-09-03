@@ -317,6 +317,9 @@ function validateProcess(process, label) {
 
 function validateToolVersions(versions, label) {
   object(versions, label, 'MUTATION_REPORT_INVALID');
+  if (Object.keys(versions).length === 0) {
+    fail('MUTATION_REPORT_INVALID', `${label} must be nonempty`);
+  }
   for (const [name, version] of Object.entries(versions)) {
     string(name, `${label} name`, TOOL_VERSION, 'MUTATION_REPORT_INVALID');
     string(version, `${label}.${name}`, TOOL_VERSION, 'MUTATION_REPORT_INVALID');
@@ -328,6 +331,205 @@ function validateReuseOrigin(origin, label) {
   validateCandidate(origin.candidate, `${label}.candidate`);
   string(origin.semanticReceiptDigest, `${label}.semanticReceiptDigest`, SHA256, 'MUTATION_ORIGIN_MISMATCH');
   string(origin.evidenceSetDigest, `${label}.evidenceSetDigest`, SHA256, 'MUTATION_ORIGIN_MISMATCH');
+}
+
+function denyReuse(message) {
+  fail('MUTATION_REUSE_DENIED', message);
+}
+
+/**
+ * A reuse reference is not authority by itself. Certify receives a resolver owned
+ * by the protected evidence store; this routine verifies that the resolver
+ * returned the exact producing receipt and composition that the reference names.
+ * Offline verification deliberately does not call it: it relies on the current
+ * signed semantic receipt after certify has performed this check.
+ */
+function validateTrustedReuseOrigin(origin, entry, options) {
+  if (options.mutationVerificationMode === 'offline') return;
+  if (typeof options.resolveReuseOrigin !== 'function') {
+    denyReuse(`${entry.packageName} reused origin cannot be resolved by trusted evidence`);
+  }
+  let resolved;
+  try {
+    resolved = options.resolveReuseOrigin(origin);
+  } catch {
+    denyReuse(`${entry.packageName} reused origin is unavailable`);
+  }
+  exact(
+    resolved,
+    ['composition', 'semanticReceipt'],
+    `${entry.packageName} resolved reuse origin`,
+    'MUTATION_REUSE_DENIED',
+  );
+  const composition = resolved.composition;
+  const receipt = resolved.semanticReceipt;
+  exact(
+    composition,
+    ['schemaVersion', 'kind', 'candidate', 'complete', 'verdict', 'passed', 'packages', 'aggregate'],
+    `${entry.packageName} origin composition`,
+    'MUTATION_REUSE_DENIED',
+  );
+  if (
+    composition.schemaVersion !== MUTATION_V21_SCHEMA ||
+    composition.kind !== 'mutation-composed-report-set-v2' ||
+    composition.complete !== true ||
+    composition.passed !== true ||
+    composition.verdict !== 'pass' ||
+    canonicalize(composition.candidate) !== canonicalize(origin.candidate) ||
+    !Array.isArray(composition.packages)
+  ) {
+    denyReuse(`${entry.packageName} reused origin composition is not a trusted pass`);
+  }
+  exact(
+    composition.aggregate,
+    [
+      'packageCount',
+      'executedPackageCount',
+      'reusedPackageCount',
+      'notRequiredPackageCount',
+      'score',
+      'statusTotals',
+      'verdict',
+      'passed',
+      'evidenceSetDigest',
+    ],
+    `${entry.packageName} origin composition aggregate`,
+    'MUTATION_REUSE_DENIED',
+  );
+  if (
+    composition.aggregate.packageCount !== composition.packages.length ||
+    composition.aggregate.verdict !== 'pass' ||
+    composition.aggregate.passed !== true ||
+    composition.aggregate.evidenceSetDigest !== origin.evidenceSetDigest ||
+    framedDigest(DOMAINS.composition, composition.packages) !== origin.evidenceSetDigest
+  ) {
+    denyReuse(`${entry.packageName} reused origin evidence set differs`);
+  }
+  const originIndex = composition.packages.findIndex((candidate) => candidate?.packageName === entry.packageName);
+  if (originIndex < 0) denyReuse(`${entry.packageName} reused origin package is absent`);
+  const originEntry = composition.packages[originIndex];
+  exact(
+    originEntry,
+    [
+      'packageName',
+      'workspace',
+      'requirement',
+      'disposition',
+      'verdict',
+      'passed',
+      'complete',
+      'reportPath',
+      'resultPath',
+      'reportDigest',
+      'resultDigest',
+      'inputDigest',
+      'evidenceRef',
+      'evidenceRefDigest',
+      'thresholds',
+      'statusTotals',
+      'targetCensus',
+      'score',
+      'origin',
+    ],
+    `${entry.packageName} origin composition package`,
+    'MUTATION_REUSE_DENIED',
+  );
+  if (
+    originEntry.requirement !== 'required' ||
+    originEntry.disposition === 'not-required' ||
+    originEntry.complete !== true ||
+    originEntry.passed !== true ||
+    originEntry.verdict !== 'pass' ||
+    originEntry.workspace !== entry.workspace ||
+    originEntry.inputDigest !== entry.inputDigest ||
+    originEntry.reportDigest !== entry.reportDigest ||
+    originEntry.resultDigest !== entry.resultDigest
+  ) {
+    denyReuse(`${entry.packageName} reused origin package does not match passing evidence`);
+  }
+
+  exact(
+    receipt,
+    [
+      'schemaVersion',
+      'kind',
+      'receiptId',
+      'candidate',
+      'outputContractDigest',
+      'releasePlanReceiptDigest',
+      'releaseProfileDigest',
+      'policyDigest',
+      'verifierProvenance',
+      'packages',
+      'packageResultSetDigest',
+      'evidenceSetDigest',
+      'verdict',
+      'semanticVerificationPerformed',
+      'receiptDigest',
+    ],
+    `${entry.packageName} origin semantic receipt`,
+    'MUTATION_REUSE_DENIED',
+  );
+  if (
+    receipt.schemaVersion !== MUTATION_V21_SCHEMA ||
+    receipt.kind !== 'mutation-semantic-verification-receipt-v2' ||
+    receipt.semanticVerificationPerformed !== true ||
+    receipt.verdict !== 'pass' ||
+    canonicalize(receipt.candidate) !== canonicalize(origin.candidate) ||
+    receipt.evidenceSetDigest !== origin.evidenceSetDigest ||
+    receipt.receiptDigest !== origin.semanticReceiptDigest
+  ) {
+    denyReuse(`${entry.packageName} reused origin receipt differs`);
+  }
+  try {
+    string(receipt.receiptId, `${entry.packageName} origin receiptId`, RECEIPT_ID, 'MUTATION_REUSE_DENIED');
+    validateProvenance(receipt.verifierProvenance);
+    string(receipt.outputContractDigest, `${entry.packageName} origin output contract`, SHA256, 'MUTATION_REUSE_DENIED');
+    string(receipt.releasePlanReceiptDigest, `${entry.packageName} origin plan receipt`, SHA256, 'MUTATION_REUSE_DENIED');
+    string(receipt.releaseProfileDigest, `${entry.packageName} origin profile`, SHA256, 'MUTATION_REUSE_DENIED');
+    string(receipt.policyDigest, `${entry.packageName} origin policy`, SHA256, 'MUTATION_REUSE_DENIED');
+    string(receipt.packageResultSetDigest, `${entry.packageName} origin result set`, SHA256, 'MUTATION_REUSE_DENIED');
+    const { receiptDigest, ...withoutDigest } = receipt;
+    if (framedDigest(DOMAINS.semanticReceipt, withoutDigest) !== receiptDigest) {
+      denyReuse(`${entry.packageName} reused origin receipt digest differs`);
+    }
+  } catch (error) {
+    if (error instanceof VerificationError && error.code === 'MUTATION_REUSE_DENIED') throw error;
+    denyReuse(`${entry.packageName} reused origin receipt is invalid`);
+  }
+  if (!Array.isArray(receipt.packages) || receipt.packages.length !== composition.packages.length) {
+    denyReuse(`${entry.packageName} reused origin receipt roster differs`);
+  }
+  const originReceiptEntry = receipt.packages[originIndex];
+  exact(
+    originReceiptEntry,
+    [
+      'packageName',
+      'disposition',
+      'inputDigest',
+      'reportDigest',
+      'resultDigest',
+      'compositionEntryDigest',
+    ],
+    `${entry.packageName} origin semantic receipt package`,
+    'MUTATION_REUSE_DENIED',
+  );
+  if (
+    originReceiptEntry?.packageName !== entry.packageName ||
+    originReceiptEntry.disposition !== originEntry.disposition ||
+    originReceiptEntry.inputDigest !== entry.inputDigest ||
+    originReceiptEntry.reportDigest !== entry.reportDigest ||
+    originReceiptEntry.resultDigest !== entry.resultDigest ||
+    originReceiptEntry.compositionEntryDigest !== framedDigest(DOMAINS.compositionEntry, originEntry)
+  ) {
+    denyReuse(`${entry.packageName} reused origin receipt package differs`);
+  }
+  const resultSet = composition.packages
+    .filter((candidate) => candidate?.requirement === 'required')
+    .map((candidate) => ({ packageName: candidate.packageName, resultDigest: candidate.resultDigest }));
+  if (receipt.packageResultSetDigest !== framedDigest(DOMAINS.packageResultSet, resultSet)) {
+    denyReuse(`${entry.packageName} reused origin result set differs`);
+  }
 }
 
 function artifactPaths(inputDigest, reportDigest, resultDigest) {
@@ -875,6 +1077,17 @@ function validateSemanticReceipt(receipt, contract, summary, options) {
 
 export function verifyMutationReportSetV21(contract, readArtifact, options = {}) {
   validateMutationContractV21(contract);
+  if (
+    options.mutationVerificationMode !== undefined &&
+    options.mutationVerificationMode !== 'certify' &&
+    options.mutationVerificationMode !== 'offline'
+  ) {
+    fail('SCHEMA_INVALID', 'mutation verification mode is invalid');
+  }
+  const verificationOptions = {
+    ...options,
+    mutationVerificationMode: options.mutationVerificationMode ?? 'certify',
+  };
   for (const key of ['candidateCommit', 'candidateTree', 'releaseUnit']) {
     if (typeof options[key] !== 'string' || options[key].length === 0) {
       fail('MUTATION_SEMANTIC_RECEIPT_MISMATCH', `mutation ${key} expectation is missing`);
@@ -919,6 +1132,11 @@ export function verifyMutationReportSetV21(contract, readArtifact, options = {})
     },
     packages: materials,
   }, true);
+  for (const entry of expectedSummary.packages) {
+    if (entry.requirement === 'required' && entry.disposition === 'reused') {
+      validateTrustedReuseOrigin(entry.origin, entry, verificationOptions);
+    }
+  }
   if (canonicalize(summary) !== canonicalize(expectedSummary)) {
     fail('MUTATION_SUMMARY_MISMATCH', 'mutation summary does not match immutable package evidence');
   }

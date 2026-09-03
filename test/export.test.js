@@ -414,7 +414,7 @@ describe('trusted candidate evidence export', () => {
 
   it('runs the full verification semantics in preflight without touching the private key', () => {
     for (const privateKeyPath of [absentPrivateKey, invalidPrivateKey]) {
-      const state = fixture({ mutation: true });
+      const state = fixture({ portable: true });
       const options = { ...exportOptions(state), privateKeyPath: privateKeyPath(state) };
       const preflight = preflightCandidateEvidence(options);
 
@@ -424,15 +424,7 @@ describe('trusted candidate evidence export', () => {
       // signature, so it must not claim that the configured signer was verified.
       assert.equal(Object.hasOwn(preflight.verified, 'signerId'), false);
       assert.deepEqual(preflight.verified.verifiedArtifacts, preflight.artifactPaths);
-      assert.deepEqual(preflight.verified.verifiedMutation, [
-        {
-          nodeId: 'test:one',
-          packageCount: 1,
-          score: 100,
-          statusTotals: state.mutationSet.statusTotals,
-          evidenceSetDigest: state.mutationSet.summary.aggregate.evidenceSetDigest,
-        },
-      ]);
+      assert.deepEqual(preflight.verified.verifiedMutation, []);
       assert.equal(existsSync(state.outputDir), false);
 
       // The very same options fail as soon as the export path reaches the key, which
@@ -460,7 +452,7 @@ describe('trusted candidate evidence export', () => {
   });
 
   it('runs CLI preflight with signing and private-key crypto operations disabled', () => {
-    const state = fixture({ mutation: true });
+    const state = fixture({ portable: true });
     const tripwire = cryptoTripwire(state);
     const common = exportCliArguments(state);
     const preflight = spawnSync(
@@ -525,7 +517,7 @@ describe('trusted candidate evidence export', () => {
     assert.equal(existsSync(state.outputDir), false);
   });
 
-  it('rejects stale result digests and malformed v2 evidence before any signing', () => {
+  it('rejects stale result digests and legacy mutation evidence before any signing', () => {
     const stale = fixture({ portable: true });
     const receipt = JSON.parse(readFileSync(stale.receiptPath, 'utf8'));
     const resultPath = join(stale.resultsDir, `${receipt.tasks[0].resultDigest}.json`);
@@ -544,7 +536,7 @@ describe('trusted candidate evidence export', () => {
       mutation: true,
       patchMutationSummary: (summary) => delete summary.aggregate.reusedDurationMs,
     });
-    expectCode('MUTATION_SUMMARY_MISMATCH', () =>
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () =>
       exportCandidateEvidence({
         ...exportOptions(malformed),
         privateKeyPath: absentPrivateKey(malformed),
@@ -650,48 +642,26 @@ describe('trusted candidate evidence export', () => {
     }
   });
 
-  it('preflights and exports a mutation-report-set-v2 contract entirely offline', () => {
+  it('keeps draft mutation-report-set-v2 evidence read-only at preflight and export', () => {
     const preflighted = fixture({ mutation: true });
-    const preflight = preflightCandidateEvidence(exportOptions(preflighted));
-    assert.deepEqual(preflight.artifactPaths, [
-      'mutation/packages-core.result.json',
-      'mutation/packages-core.stryker.json',
-      'mutation/summary.json',
-    ]);
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () =>
+      preflightCandidateEvidence(exportOptions(preflighted)),
+    );
     assert.equal(existsSync(preflighted.outputDir), false);
 
     const state = fixture({ mutation: true });
-    assert.equal(exportCandidateEvidence(exportOptions(state)).ok, true);
-    const verified = loadAndVerify({
-      envelopePath: join(state.outputDir, 'envelope.json'),
-      resultsDir: join(state.outputDir, 'results'),
-      artifactsDir: join(state.outputDir, 'artifacts'),
-      taskPolicyPath: join(state.outputDir, 'task-policy.json'),
-      trustStorePath: state.trustStorePath,
-      expectedRepository: 'fixture/repository',
-      expectedCommit: state.commit,
-      expectedTree: state.tree,
-      expectedPolicyDigest: state.built.taskPolicyDigest,
-    });
-    assert.deepEqual(verified.verifiedMutation, [
-      {
-        nodeId: 'test:one',
-        packageCount: 1,
-        score: 100,
-        statusTotals: state.mutationSet.statusTotals,
-        evidenceSetDigest: state.mutationSet.summary.aggregate.evidenceSetDigest,
-      },
-    ]);
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () => exportCandidateEvidence(exportOptions(state)));
+    assert.equal(existsSync(state.outputDir), false);
   });
 
-  it('refuses workstation paths inside declared v2 mutation artifacts before signing', () => {
+  it('refuses legacy mutation artifacts before opening or signing them', () => {
     const state = fixture({
       mutation: true,
       patchMutationSummary: (summary) => {
         summary.baseline.summarySha256 = '/Users/inspector/stynx/mutation/summary.json';
       },
     });
-    expectCode('ARTIFACT_HOST_PATH', () => preflightCandidateEvidence(exportOptions(state)));
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () => preflightCandidateEvidence(exportOptions(state)));
     assert.equal(existsSync(state.outputDir), false);
   });
 

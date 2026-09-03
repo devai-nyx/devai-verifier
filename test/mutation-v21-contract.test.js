@@ -460,12 +460,90 @@ function mutationV21Fixture({ dispositions = ['executed', 'reused', 'not-require
   return state;
 }
 
-function verifyV21(state) {
+function verifyV21(state, options = {}) {
   return verifyMutationReportSet(state.contract, state.artifactsDir, {
     candidateCommit: state.candidate.commit,
     candidateTree: state.candidate.tree,
     releaseUnit: state.candidate.releaseUnit,
+    mutationVerificationMode: 'offline',
+    ...options,
   });
+}
+
+function trustedReuseResolution(item) {
+  const packages = [structuredClone(item.entry)];
+  const origin = item.entry.origin;
+  const evidenceSetDigest = framedDigest(COMPOSITION_DOMAIN, packages);
+  const composition = {
+    schemaVersion: V21_SCHEMA,
+    kind: 'mutation-composed-report-set-v2',
+    candidate: origin.candidate,
+    complete: true,
+    verdict: 'pass',
+    passed: true,
+    packages,
+    aggregate: {
+      packageCount: 1,
+      executedPackageCount: 0,
+      reusedPackageCount: 1,
+      notRequiredPackageCount: 0,
+      score: item.entry.score,
+      statusTotals: item.entry.statusTotals,
+      verdict: 'pass',
+      passed: true,
+      evidenceSetDigest,
+    },
+  };
+  const receiptWithoutDigest = {
+    schemaVersion: V21_SCHEMA,
+    kind: 'mutation-semantic-verification-receipt-v2',
+    receiptId: `MSV2-${'2'.repeat(16)}`,
+    candidate: origin.candidate,
+    outputContractDigest: 'a'.repeat(64),
+    releasePlanReceiptDigest: 'b'.repeat(64),
+    releaseProfileDigest: 'c'.repeat(64),
+    policyDigest: 'd'.repeat(64),
+    verifierProvenance: {
+      source: {
+        repository: 'devai-verifier',
+        commit: 'fcefd0ad9b1210f5d460509f801a16fc3c4dcbd1',
+        tree: 'ad06a07074428af47e2fd33ad1115efc7b1feb1e',
+        byteSetDigest: 'e'.repeat(64),
+      },
+      vendor: {
+        root: 'vendor/devai-verifier',
+        manifestPath: 'vendor/devai-verifier/provenance.json',
+        manifestDigest: 'f'.repeat(64),
+        sourceCommit: 'fcefd0ad9b1210f5d460509f801a16fc3c4dcbd1',
+        sourceTree: 'ad06a07074428af47e2fd33ad1115efc7b1feb1e',
+        byteSetDigest: 'e'.repeat(64),
+      },
+      byteEquality: true,
+    },
+    packages: [
+      {
+        packageName: item.entry.packageName,
+        disposition: 'reused',
+        inputDigest: item.entry.inputDigest,
+        reportDigest: item.entry.reportDigest,
+        resultDigest: item.entry.resultDigest,
+        compositionEntryDigest: framedDigest(COMPOSITION_ENTRY_DOMAIN, packages[0]),
+      },
+    ],
+    packageResultSetDigest: framedDigest(PACKAGE_RESULT_SET_DOMAIN, [
+      { packageName: item.entry.packageName, resultDigest: item.entry.resultDigest },
+    ]),
+    evidenceSetDigest,
+    verdict: 'pass',
+    semanticVerificationPerformed: true,
+  };
+  const semanticReceipt = {
+    ...receiptWithoutDigest,
+    receiptDigest: framedDigest(SEMANTIC_RECEIPT_DOMAIN, receiptWithoutDigest),
+  };
+  origin.evidenceSetDigest = evidenceSetDigest;
+  origin.semanticReceiptDigest = semanticReceipt.receiptDigest;
+  return { composition, semanticReceipt };
 }
 
 function retargetInputIdentity(state, item, projection) {
@@ -517,6 +595,38 @@ describe('mutation report-set v2.1 immutable contract', () => {
   it('preserves executed, reused, and not-required as three explicit dispositions', () => {
     const state = mutationV21Fixture();
     assertVerification(verifyV21(state), state);
+  });
+
+  it('denies reused evidence during certify unless a protected resolver supplies its origin', () => {
+    const state = mutationV21Fixture({ dispositions: ['reused'] });
+    expectCode('MUTATION_REUSE_DENIED', () =>
+      verifyV21(state, { mutationVerificationMode: 'certify' }),
+    );
+    expectCode('MUTATION_REUSE_DENIED', () =>
+      verifyV21(state, {
+        mutationVerificationMode: 'certify',
+        resolveReuseOrigin: () => ({}),
+      }),
+    );
+
+    const resolved = mutationV21Fixture({ dispositions: ['reused'] });
+    const resolution = trustedReuseResolution(resolved.packages[0]);
+    resolved.reseal();
+    resolved.write();
+    assertVerification(
+      verifyV21(resolved, {
+        mutationVerificationMode: 'certify',
+        resolveReuseOrigin: () => resolution,
+      }),
+      resolved,
+    );
+    resolution.composition.packages[0].resultDigest = '0'.repeat(64);
+    expectCode('MUTATION_REUSE_DENIED', () =>
+      verifyV21(resolved, {
+        mutationVerificationMode: 'certify',
+        resolveReuseOrigin: () => resolution,
+      }),
+    );
   });
 
   it('keeps an all-not-required composition distinct from pass', () => {
@@ -592,6 +702,14 @@ describe('mutation report-set v2.1 immutable contract', () => {
     rejected.reseal();
     rejected.write();
     expectCode('MUTATION_RUNTIME_FAILURE', () => verifyV21(rejected));
+  });
+
+  it('requires at least one recorded tool version in immutable package evidence', () => {
+    const state = mutationV21Fixture({ dispositions: ['executed'] });
+    state.packages[0].result.toolVersions = {};
+    state.reseal();
+    state.write();
+    expectCode('MUTATION_REPORT_INVALID', () => verifyV21(state));
   });
 
   it('recomputes the framed input digest instead of accepting a consistent self-assertion', () => {
@@ -1019,6 +1137,23 @@ describe('mutation v2.1 offline closure', () => {
       );
     }
   });
+
+  it(
+    'refuses a symlinked bundle root rather than canonicalizing it before verification',
+    { skip: process.platform === 'win32' },
+    () => {
+      const fixture = preparedV21Bundle();
+      const linkedBundle = join(temporaryDirectory('devai-mutation-v21-bundle-link-'), 'bundle');
+      symlinkSync(fixture.bundleDir, linkedBundle, 'dir');
+      expectCode('ARTIFACT_SYMLINK_ESCAPE', () =>
+        verifyPreparedBundle({
+          bundleDir: linkedBundle,
+          trustStorePath: fixture.trustStorePath,
+          ...fixture.expected,
+        }),
+      );
+    },
+  );
 
   it('requires signed receipt, manifest, and supplied task-result populations to be identical', () => {
     const fixture = preparedV21Bundle();

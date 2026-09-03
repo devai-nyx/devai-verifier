@@ -1,12 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import {
-  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -19,7 +17,6 @@ import {
   assertString,
   canonicalBytes,
   canonicalize,
-  readJson,
   sha256Hex,
 } from './canonical.js';
 import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
@@ -29,6 +26,11 @@ import {
   verifyCandidateEvidence,
   verifyCandidateReceiptEvidence,
 } from './verify.js';
+import {
+  copyRootRelativeRegularFile,
+  readAbsoluteRegularFile,
+  readRootRelativeRegularFile,
+} from './safe-path.js';
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -131,6 +133,21 @@ function readCommittedDescriptor(repo, commit) {
   }
 }
 
+function readExternalJson(path, label) {
+  let bytes;
+  try {
+    bytes = readAbsoluteRegularFile(path, label);
+  } catch (error) {
+    if (error instanceof VerificationError) throw error;
+    throw new VerificationError('INPUT_MISSING', `${label} is unavailable`);
+  }
+  try {
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw new VerificationError('MALFORMED_JSON', `${label} is not valid JSON`);
+  }
+}
+
 function exactCandidate(repo, commit, tree) {
   if (!GIT_OBJECT.test(commit) || !GIT_OBJECT.test(tree)) {
     throw new VerificationError('SCHEMA_INVALID', 'exact commit and tree are required');
@@ -150,8 +167,8 @@ function exactCandidate(repo, commit, tree) {
 }
 
 function matchingKeyPair(privateKeyPath, publicKeyPath) {
-  const privateKey = createPrivateKey(readFileSync(privateKeyPath));
-  const publicKey = createPublicKey(readFileSync(publicKeyPath));
+  const privateKey = createPrivateKey(readAbsoluteRegularFile(privateKeyPath, 'private key'));
+  const publicKey = createPublicKey(readAbsoluteRegularFile(publicKeyPath, 'public key'));
   if (privateKey.asymmetricKeyType !== 'ed25519' || publicKey.asymmetricKeyType !== 'ed25519') {
     throw new VerificationError('KEY_INVALID', 'signing key pair must use Ed25519');
   }
@@ -171,20 +188,6 @@ function validateSignerId(value) {
     throw new VerificationError('SCHEMA_INVALID', 'signer ID is invalid');
 }
 
-function copyRegularFile(source, destination, label) {
-  let stat;
-  try {
-    stat = lstatSync(source);
-  } catch (error) {
-    throw new VerificationError('INPUT_MISSING', `${label} is unreadable: ${error.message}`);
-  }
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new VerificationError('ARTIFACT_INVALID', `${label} must be a regular non-symlink file`);
-  }
-  mkdirSync(dirname(destination), { recursive: true });
-  copyFileSync(source, destination);
-}
-
 function declaredArtifactPaths(taskPolicy) {
   const paths = new Set();
   if (taskPolicy.schemaVersion !== '1.1.0') return [];
@@ -192,32 +195,6 @@ function declaredArtifactPaths(taskPolicy) {
     for (const path of node.outputContract.paths ?? []) paths.add(path);
   }
   return [...paths].sort();
-}
-
-function candidateArtifactPath(repository, path) {
-  let cursor = repository;
-  let stat;
-  for (const segment of path.split('/')) {
-    cursor = join(cursor, segment);
-    try {
-      stat = lstatSync(cursor);
-    } catch {
-      throw new VerificationError('ARTIFACTS_MISSING', `artifact ${path} is unavailable`);
-    }
-    if (stat.isSymbolicLink()) {
-      throw new VerificationError(
-        'ARTIFACT_SYMLINK',
-        `artifact ${path} traverses a symbolic link`,
-      );
-    }
-  }
-  if (!stat.isFile()) {
-    throw new VerificationError(
-      'ARTIFACT_INVALID',
-      `artifact ${path} must be a regular non-symlink file`,
-    );
-  }
-  return cursor;
 }
 
 /**
@@ -228,11 +205,9 @@ function candidateArtifactPath(repository, path) {
 function stageArtifacts(repository, artifactPaths, artifactsDir) {
   mkdirSync(artifactsDir, { recursive: true });
   for (const path of artifactPaths) {
-    copyRegularFile(
-      candidateArtifactPath(repository, path),
-      join(artifactsDir, path),
-      `artifact ${path}`,
-    );
+    const destination = join(artifactsDir, path);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyRootRelativeRegularFile(repository, path, destination, `artifact ${path}`);
   }
 }
 
@@ -261,7 +236,7 @@ export function preflightCandidateEvidence(options) {
   const controlledPublicKey = controlledInput(repository, options.publicKeyPath, 'public key');
   const output = outputDestination(repository, options.outputDir);
   const descriptor = readCommittedDescriptor(repository, options.commit);
-  const receipt = readJson(options.receiptPath, 'candidate receipt');
+  const receipt = readExternalJson(options.receiptPath, 'candidate receipt');
   const built = buildExpectedTaskPolicy({
     repo: repository,
     descriptor,
@@ -274,18 +249,25 @@ export function preflightCandidateEvidence(options) {
     policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
   });
   for (const node of built.taskPolicy.requiredNodes) {
-    if (mutationContractVersion(node.outputContract?.kind) === 1) {
+    const contract = node.outputContract;
+    if (
+      typeof contract?.kind === 'string' &&
+      contract.kind.startsWith('mutation-') &&
+      (
+        mutationContractVersion(contract.kind) !== 2 ||
+        contract.schemaVersion !== '2.1.0'
+      )
+    ) {
       throw new VerificationError(
         'MUTATION_VERSION_UNSUPPORTED',
-        'mutation v1 evidence is read-only and cannot be exported',
+        'legacy mutation evidence is read-only and cannot be exported',
       );
     }
   }
   const artifactPaths = declaredArtifactPaths(built.taskPolicy);
   for (const path of artifactPaths) {
-    const absolute = candidateArtifactPath(repository, path);
     validateArtifactContent({
-      bytes: readFileSync(absolute),
+      bytes: readRootRelativeRegularFile(repository, path, `artifact ${path}`),
       path,
       mediaType: artifactMediaType(path),
     });
@@ -304,6 +286,7 @@ export function preflightCandidateEvidence(options) {
     expectedTree: options.tree,
     expectedPolicyDigest: built.taskPolicyDigest,
     allowAdditionalArtifactFiles: true,
+    resolveReuseOrigin: options.resolveReuseOrigin,
   });
   return {
     repository,
@@ -370,8 +353,9 @@ export function exportCandidateEvidence(options) {
       });
     }
     for (const task of receipt.tasks) {
-      copyRegularFile(
-        join(resultsDir, `${task.resultDigest}.json`),
+      copyRootRelativeRegularFile(
+        resultsDir,
+        `${task.resultDigest}.json`,
         join(staging, 'results', `${task.resultDigest}.json`),
         `task result ${task.nodeId}`,
       );
@@ -402,7 +386,7 @@ export function exportCandidateEvidence(options) {
         artifacts: verified.verifiedArtifacts.map((path) => ({
           path,
           mediaType: artifactMediaType(path),
-          sha256: sha256Hex(readFileSync(join(staging, 'artifacts', path))),
+          sha256: sha256Hex(readRootRelativeRegularFile(join(staging, 'artifacts'), path, `artifact ${path}`)),
         })),
       }),
     };

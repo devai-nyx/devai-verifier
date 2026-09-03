@@ -69,8 +69,18 @@ input projection, report/result addresses, five mutation thresholds, all eight
 Stryker status totals, aggregate evidence-set digest, and semantic-receipt
 digest; and treats empty or pending required populations as incomplete rather
 than passed. Its pure finalizer reads only supplied immutable documents and
-opens no process. Legacy v1 evidence remains readable but cannot be exported as
-new evidence. Every other `mutation-*` kind is reserved and rejected.
+opens no process. Legacy v1 and draft v2.0 evidence remain readable for
+historical verification only; neither may be preflighted, exported, or
+published as new evidence. Every other `mutation-*` kind is reserved and
+rejected.
+
+Certify callers that select a `reused` v2.1 package must supply a protected
+`resolveReuseOrigin(origin)` function. It resolves the origin outside the
+candidate repository and returns the exact trusted producing semantic receipt
+and composition. The verifier then requires matching candidate, evidence-set,
+receipt, package input/report/result identities, and a passing origin entry.
+The portable offline verifier intentionally does not invoke that resolver: its
+boundary is the signed current semantic receipt produced by certify.
 
 Offline verification of a `2.1.0` bundle additionally requires all eight
 external identities: repository, commit, tree, task-policy digest, signer ID,
@@ -171,6 +181,11 @@ artifact, and mutation-semantic verification without creating an output or
 performing any signing, key generation, or private-key operation. In preflight
 mode `--private-key` is not required; normal export continues to require it and
 performs the sole signing operation only after preflight succeeds.
+
+The CLI has no candidate-supplied reuse resolver. Consequently, a candidate
+with reused v2.1 evidence is refused by CLI preflight unless its hosting API
+supplies the protected resolver; callers must not work around that refusal by
+relabeling reused evidence as fresh.
 
 Affected-mode export additionally requires `--base <exact-ancestor-commit>`.
 The output directory is created atomically. Legacy schema 1.0 bundles contain

@@ -1,5 +1,5 @@
 import { createPublicKey, verify as verifySignature } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { artifactMediaType, validateArtifactContent } from './artifact-safety.js';
 import {
@@ -9,7 +9,6 @@ import {
   assertString,
   assertUniqueStrings,
   canonicalBytes,
-  readJson,
   sha256Hex,
 } from './canonical.js';
 import {
@@ -243,20 +242,17 @@ function validateTaskResult(result, label) {
  * label, so neither host paths nor file contents leak into verifier output.
  */
 function readTaskResultFile(resultsDir, resultDigest, label) {
-  const absolute = join(resultsDir, `${resultDigest}.json`);
-  let stat;
-  try {
-    stat = lstatSync(absolute);
-  } catch {
-    throw new VerificationError('INPUT_MISSING', `${label} is unavailable`);
-  }
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new VerificationError('RESULT_INVALID', `${label} must be a regular non-symlink file`);
-  }
   let text;
   try {
-    text = readFileSync(absolute, 'utf8');
-  } catch {
+    text = readRootRelativeRegularFile(resultsDir, `${resultDigest}.json`, label).toString('utf8');
+  } catch (error) {
+    if (error instanceof VerificationError && error.code === 'ARTIFACT_SYMLINK_ESCAPE') {
+      throw new VerificationError('RESULT_INVALID', `${label} must be a regular non-symlink file`);
+    }
+    if (error instanceof VerificationError && error.code === 'ARTIFACTS_MISSING') {
+      throw new VerificationError('INPUT_MISSING', `${label} is unavailable`);
+    }
+    if (error instanceof VerificationError) throw error;
     throw new VerificationError('INPUT_MISSING', `${label} is unreadable`);
   }
   try {
@@ -299,6 +295,7 @@ function verifyArtifacts(
   artifactsDir,
   candidate,
   allowAdditionalArtifactFiles = false,
+  mutationVerification = {},
 ) {
   const expectedPaths = artifactPaths(policy);
   if (expectedPaths.length === 0) return { paths: [], mutation: [] };
@@ -314,10 +311,7 @@ function verifyArtifacts(
       actualPaths = filesBelow(resolve(artifactsDir)).sort();
     } catch (error) {
       if (error instanceof VerificationError) throw error;
-      throw new VerificationError(
-        'ARTIFACTS_MISSING',
-        `artifact directory is unreadable: ${error.message}`,
-      );
+      throw new VerificationError('ARTIFACTS_MISSING', 'artifact directory is unreadable');
     }
     if (
       actualPaths.length !== expectedPaths.length ||
@@ -362,24 +356,7 @@ function verifyArtifacts(
         }
         continue;
       }
-      const absolute = resolve(artifactsDir, path);
-      const fromRoot = relative(resolve(artifactsDir), absolute);
-      if (fromRoot.startsWith(`..${sep}`) || fromRoot === '..') {
-        throw new VerificationError('ARTIFACT_PATH_ESCAPE', `artifact ${path} escapes its bundle`);
-      }
-      let stat;
-      try {
-        stat = lstatSync(absolute);
-      } catch (error) {
-        throw new VerificationError(
-          'ARTIFACTS_MISSING',
-          `artifact ${path} is unreadable: ${error.message}`,
-        );
-      }
-      if (!stat.isFile() || stat.isSymbolicLink()) {
-        throw new VerificationError('ARTIFACT_INVALID', `artifact ${path} is not a regular file`);
-      }
-      const bytes = readFileSync(absolute);
+      const bytes = readRootRelativeRegularFile(artifactsDir, path, `artifact ${path}`);
       validateArtifactContent({
         bytes,
         path,
@@ -402,6 +379,7 @@ function verifyArtifacts(
       ...verifyMutationReportSet(node.outputContract, artifactsDir, {
         ...candidate,
         releaseUnit: policy.repositoryId,
+        ...mutationVerification,
       }),
     });
   }
@@ -455,6 +433,7 @@ function verifyValidatedCandidateReceipt({
   signerId,
   allowAdditionalArtifactFiles = false,
   expectedResultDigests,
+  mutationVerification,
 }) {
   validateReceipt(receipt);
   if (receipt.repository.id !== expectedRepository) {
@@ -557,6 +536,7 @@ function verifyValidatedCandidateReceipt({
       candidateTree: receipt.repository.tree,
     },
     allowAdditionalArtifactFiles,
+    mutationVerification,
   );
 
   return {
@@ -591,6 +571,7 @@ export function verifyCandidateReceiptEvidence({
   bindingMode = 'exact-commit',
   artifactsDir,
   allowAdditionalArtifactFiles = false,
+  resolveReuseOrigin,
 }) {
   const context = {
     resultsDir,
@@ -602,6 +583,7 @@ export function verifyCandidateReceiptEvidence({
     bindingMode,
     artifactsDir,
     allowAdditionalArtifactFiles,
+    mutationVerification: { mutationVerificationMode: 'certify', resolveReuseOrigin },
   };
   validateVerificationContext(context);
   return verifyValidatedCandidateReceipt({ ...context, receipt });
@@ -623,6 +605,7 @@ export function verifyCandidateEvidence({
   expectedTrustStoreDigest,
   expectedKeyId,
   expectedResultDigests,
+  resolveReuseOrigin,
 }) {
   const context = {
     resultsDir,
@@ -634,6 +617,10 @@ export function verifyCandidateEvidence({
     bindingMode,
     artifactsDir,
     expectedResultDigests,
+    mutationVerification: {
+      mutationVerificationMode: 'offline',
+      ...(resolveReuseOrigin !== undefined && { resolveReuseOrigin }),
+    },
   };
   validateVerificationContext(context);
   validateTrustStore(trustStore);
@@ -699,18 +686,31 @@ export function verifyCandidateEvidence({
 }
 
 export function loadAndVerify(options) {
+  const parseSafeJson = (path, label) => {
+    let bytes;
+    try {
+      bytes = readAbsoluteRegularFile(path, label);
+    } catch (error) {
+      if (error instanceof VerificationError) throw error;
+      throw new VerificationError('INPUT_MISSING', `${label} is unavailable`);
+    }
+    try {
+      return JSON.parse(bytes.toString('utf8'));
+    } catch {
+      throw new VerificationError('MALFORMED_JSON', `${label} is not valid JSON`);
+    }
+  };
   let trustStore;
   try {
-    const bytes = readAbsoluteRegularFile(options.trustStorePath, 'trust store');
-    trustStore = JSON.parse(bytes.toString('utf8'));
+    trustStore = parseSafeJson(options.trustStorePath, 'trust store');
   } catch (error) {
     if (error instanceof VerificationError) throw error;
     throw new VerificationError('MALFORMED_JSON', 'trust store is not valid JSON');
   }
   return verifyCandidateEvidence({
     ...options,
-    envelope: readJson(options.envelopePath, 'signed envelope'),
-    taskPolicy: readJson(options.taskPolicyPath, 'task policy'),
+    envelope: parseSafeJson(options.envelopePath, 'signed envelope'),
+    taskPolicy: parseSafeJson(options.taskPolicyPath, 'task policy'),
     trustStore,
   });
 }

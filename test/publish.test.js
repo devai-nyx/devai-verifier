@@ -6,7 +6,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { canonicalBytes, canonicalize, sha256Hex } from '../src/canonical.js';
-import { publishCandidateEvidence, verifyPreparedBundle } from '../src/publish.js';
+import {
+  assertMutationWriteBoundary,
+  publishCandidateEvidence,
+  verifyPreparedBundle,
+} from '../src/publish.js';
 import { PAYLOAD_TYPE } from '../src/verify.js';
 
 const temporaryDirectories = [];
@@ -372,6 +376,24 @@ function expectCode(code, action) {
 }
 
 describe('protected evidence publication', () => {
+  it('keeps v1 and draft v2 mutation evidence read-only at the publication boundary', () => {
+    for (const outputContract of [
+      { kind: 'mutation-report-set-v1' },
+      { kind: 'mutation-report-set-v2', schemaVersion: '2.0.0' },
+    ]) {
+      expectCode('MUTATION_VERSION_UNSUPPORTED', () =>
+        assertMutationWriteBoundary({ requiredNodes: [{ outputContract }] }),
+      );
+    }
+    assert.doesNotThrow(() =>
+      assertMutationWriteBoundary({
+        requiredNodes: [
+          { outputContract: { kind: 'mutation-report-set-v2', schemaVersion: '2.1.0' } },
+        ],
+      }),
+    );
+  });
+
   it('reverifies, publishes one immutable tag, dispatches, and is idempotent for identical bytes', () => {
     const state = fixture();
     const dispatched = [];
