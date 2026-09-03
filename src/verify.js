@@ -12,7 +12,11 @@ import {
   readJson,
   sha256Hex,
 } from './canonical.js';
-import { validateMutationContract, verifyMutationReportSet } from './mutation.js';
+import {
+  mutationContractVersion,
+  validateMutationContract,
+  verifyMutationReportSet,
+} from './mutation.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -29,7 +33,9 @@ function validateOutputContract(contract, label) {
     throw new VerificationError('SCHEMA_INVALID', `${label}.paths must be nonempty when present`);
   }
   for (const path of contract.paths) assertString(path, `${label} path`, PORTABLE_PATH);
-  if (contract.kind === 'mutation-report-set-v1') validateMutationContract(contract, label);
+  if (mutationContractVersion(contract.kind, label) !== undefined) {
+    validateMutationContract(contract, label);
+  }
 }
 
 function validateTaskPolicy(policy) {
@@ -310,7 +316,7 @@ function verifyArtifacts(policy, results, artifactsDir, candidate) {
   }
   const mutation = [];
   for (const node of policy.requiredNodes) {
-    if (node.outputContract.kind !== 'mutation-report-set-v1') continue;
+    if (mutationContractVersion(node.outputContract.kind) === undefined) continue;
     mutation.push({
       nodeId: node.nodeId,
       ...verifyMutationReportSet(node.outputContract, artifactsDir, candidate),

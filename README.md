@@ -21,6 +21,48 @@ verifier independently checks the exact package and artifact roster, canonical
 JSON, normalized paths, Stryker status totals and score calculation, package
 thresholds, report/result digests, aggregate totals, and the complete/pass
 verdict. Absolute workstation paths and incomplete report sets are rejected.
+A v1 contract accepts either the standard `mutation-report-set-v1` summary or
+the `mutation-composed-report-set-v1` summary, and a composed v1 summary must
+still mix fresh and reused packages.
+
+## `mutation-report-set-v2`
+
+A `mutation-report-set-v2` output contract pins `schemaVersion` `2.0.0` and
+always requires the `mutation-composed-report-set-v2` summary, with everything
+v1 checks plus:
+
+- **Strict all-fresh, all-reused, and mixed compositions.** All three are
+  accepted, and each package's provenance is derived from its own digest-bound
+  package result rather than read from the summary. Fresh packages must carry
+  exact successful process metadata and null baseline identity; reused packages
+  must carry no process metadata and the exact declared baseline commit and tree.
+- **Immutable per-package evidence references.** Every summary package carries a
+  `mutation-package-evidence-ref-v2` reference binding the package name,
+  workspace, report and result paths, report and result digests, provenance,
+  baseline identity, and input projection digest. Each reference is
+  content-addressed by `evidenceRefDigest`, and `aggregate.evidenceSetDigest`
+  binds the ordered list of those digests, so no package evidence can be
+  substituted, reordered, added, or dropped without breaking a digest the
+  verifier recomputes from the artifacts themselves.
+- **Mandatory v2 metadata.** `candidate`, `baseline`, `semanticRebindComparison`,
+  `aggregate.reusedDurationMs`, and `aggregate.evidenceSetDigest` are required
+  even when every package is fresh; the reduced all-fresh summary that omits
+  them is rejected rather than silently accepted.
+- **Explicit version rejection.** Any mutation report-set or evidence-reference
+  kind this verifier does not implement fails closed with
+  `MUTATION_VERSION_UNSUPPORTED`, including a v1 summary under a v2 contract and
+  a v2 summary under a v1 contract. Contracts are no longer skipped when their
+  kind is unrecognized.
+- **Content safety inside the report set.** v2 mutation artifacts are inspected
+  for credential material and workstation-specific absolute paths as they are
+  read, so standalone mutation verification rejects them without depending on an
+  enclosing bundle walk. Roster and digest divergences use the stable
+  `MUTATION_ROSTER_MISMATCH` and `ARTIFACT_DIGEST_MISMATCH` codes.
+
+Verification stays pure and offline: `preflightCandidateEvidence` and
+`verifyPreparedBundle` check a v2 report set with no network, and
+`verifyPreparedBundle` needs no candidate checkout or Git remote.
+
 Declared UTF-8 text and JSON artifacts are also rejected when they contain
 high-confidence credential material, private-key blocks, credential-bearing
 URLs, or workstation-specific absolute paths. Rejections use stable

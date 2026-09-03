@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -118,6 +118,22 @@ function rewriteStandardResult(state) {
   put(join(state.artifactsDir, state.contract.summaryPath), state.summary);
 }
 
+function semanticRebindComparison() {
+  return {
+    kind: 'root-manifest-unchanged-with-historical-input-v1',
+    allowedScriptTransitions: [],
+    canonicalContractBytes: 597,
+    canonicalContractSha256: 'f'.repeat(64),
+    comparison: {
+      historicalMutationInputTreeEntries: 'match-explicit-historical-candidate-mode-type-oid',
+      otherMutationInputTreeEntries: 'identical-mode-type-oid',
+      rootManifest: 'source-and-target-identical',
+    },
+    sourceRootManifest: { bytes: 10790, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+    targetRootManifest: { bytes: 10790, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+  };
+}
+
 function composedFixture() {
   const artifactsDir = mkdtempSync(join(tmpdir(), 'devai-composed-mutation-proof-'));
   temporaryDirectories.push(artifactsDir);
@@ -212,28 +228,7 @@ function composedFixture() {
     kind: 'mutation-composed-report-set-v1',
     candidate,
     baseline,
-    semanticRebindComparison: {
-      kind: 'root-manifest-unchanged-with-historical-input-v1',
-      allowedScriptTransitions: [],
-      canonicalContractBytes: 597,
-      canonicalContractSha256: 'f'.repeat(64),
-      comparison: {
-        historicalMutationInputTreeEntries:
-          'match-explicit-historical-candidate-mode-type-oid',
-        otherMutationInputTreeEntries: 'identical-mode-type-oid',
-        rootManifest: 'source-and-target-identical',
-      },
-      sourceRootManifest: {
-        bytes: 10790,
-        gitBlobOid: '1'.repeat(40),
-        sha256: '2'.repeat(64),
-      },
-      targetRootManifest: {
-        bytes: 10790,
-        gitBlobOid: '1'.repeat(40),
-        sha256: '2'.repeat(64),
-      },
-    },
+    semanticRebindComparison: semanticRebindComparison(),
     complete: true,
     passed: true,
     packages,
@@ -249,6 +244,158 @@ function composedFixture() {
   };
   put(join(artifactsDir, contract.summaryPath), summary);
   return { artifactsDir, baseline, candidate, contract, packages, summary };
+}
+
+function composedV2Fixture({ packageCount = 4, freshCount = 2 } = {}) {
+  const artifactsDir = mkdtempSync(join(tmpdir(), 'devai-mutation-v2-proof-'));
+  temporaryDirectories.push(artifactsDir);
+  const baseline = {
+    commit: 'a'.repeat(40),
+    tree: 'b'.repeat(40),
+    summaryBytes: 4096,
+    summarySha256: 'c'.repeat(64),
+  };
+  const candidate = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
+  const packageContracts = [];
+  const packages = [];
+  const paths = ['mutation/summary.json'];
+  let durationMs = 0;
+  let freshDurationMs = 0;
+  for (let index = 0; index < packageCount; index += 1) {
+    const stem = `package-${String(index).padStart(2, '0')}`;
+    const packageName = `@fixture/${stem}`;
+    const workspace = `packages/${stem}`;
+    const resultPath = `mutation/${stem}.result.json`;
+    const reportPath = `mutation/${stem}.stryker.json`;
+    const thresholds = { high: 100, low: 90, break: 90 };
+    packageContracts.push({ packageName, workspace, resultPath, reportPath, thresholds });
+    paths.push(resultPath, reportPath);
+    const report = {
+      schemaVersion: '1',
+      projectRoot: '.',
+      thresholds,
+      files: {
+        [`src/${stem}.ts`]: {
+          language: 'typescript',
+          mutants: [{ id: String(index), status: 'Killed' }],
+        },
+      },
+      testFiles: {},
+      config: {},
+      framework: { name: 'StrykerJS', branding: {} },
+    };
+    const reportDigest = sha256Hex(Buffer.from(canonicalize(report)));
+    const fresh = index < freshCount;
+    const packageDurationMs = index + 1;
+    const result = {
+      schemaVersion: '1.0.0',
+      kind: 'mutation-package-result-v1',
+      packageName,
+      workspace,
+      passed: true,
+      durationMs: packageDurationMs,
+      toolVersions: { stryker: '9.6.1' },
+      thresholds,
+      score: 100,
+      statusTotals: totals({ Killed: 1 }),
+      reportDigest,
+      ...(fresh && { process: successfulProcess() }),
+    };
+    const resultDigest = sha256Hex(Buffer.from(canonicalize(result)));
+    const evidenceRef = {
+      baselineCommit: fresh ? null : baseline.commit,
+      baselineTree: fresh ? null : baseline.tree,
+      inputProjectionDigest: sha256Hex(Buffer.from(`input:${packageName}`)),
+      kind: 'mutation-package-evidence-ref-v2',
+      packageName,
+      provenance: fresh ? 'fresh' : 'reused',
+      reportDigest,
+      reportPath,
+      resultDigest,
+      resultPath,
+      workspace,
+    };
+    packages.push({
+      baselineCommit: evidenceRef.baselineCommit,
+      baselineTree: evidenceRef.baselineTree,
+      durationMs: packageDurationMs,
+      evidenceRef,
+      evidenceRefDigest: sha256Hex(evidenceRef),
+      inputProjectionDigest: evidenceRef.inputProjectionDigest,
+      packageName,
+      passed: true,
+      ...(fresh && { process: successfulProcess() }),
+      provenance: evidenceRef.provenance,
+      reportDigest,
+      reportPath,
+      resultDigest,
+      resultPath,
+      score: 100,
+      statusTotals: totals({ Killed: 1 }),
+      targetCensus: { targetFileCount: 1, totalMutants: 1 },
+      thresholds,
+      workspace,
+    });
+    durationMs += packageDurationMs;
+    if (fresh) freshDurationMs += packageDurationMs;
+    put(join(artifactsDir, reportPath), report);
+    put(join(artifactsDir, resultPath), result);
+  }
+  const contract = {
+    kind: 'mutation-report-set-v2',
+    schemaVersion: '2.0.0',
+    expectedPackageCount: packageCount,
+    summaryPath: 'mutation/summary.json',
+    packages: packageContracts,
+    paths,
+  };
+  const state = {
+    artifactsDir,
+    baseline,
+    candidate,
+    contract,
+    summary: {
+      schemaVersion: '2.0.0',
+      kind: 'mutation-composed-report-set-v2',
+      candidate,
+      baseline,
+      semanticRebindComparison: semanticRebindComparison(),
+      complete: true,
+      passed: true,
+      packages,
+      aggregate: {
+        packageCount,
+        freshPackageCount: freshCount,
+        reusedPackageCount: packageCount - freshCount,
+        durationMs,
+        freshDurationMs,
+        reusedDurationMs: durationMs - freshDurationMs,
+        score: 100,
+        statusTotals: totals({ Killed: packageCount }),
+        evidenceSetDigest: sha256Hex(packages.map((entry) => entry.evidenceRefDigest)),
+      },
+    },
+  };
+  // Reseals the internal digest chain the way a forger with full summary control would,
+  // so that binding tests fail on the recomputed evidence rather than on stale digests.
+  state.reseal = () => {
+    for (const entry of state.summary.packages) {
+      entry.evidenceRefDigest = sha256Hex(entry.evidenceRef);
+    }
+    state.summary.aggregate.evidenceSetDigest = sha256Hex(
+      state.summary.packages.map((entry) => entry.evidenceRefDigest),
+    );
+  };
+  state.write = () => put(join(artifactsDir, contract.summaryPath), state.summary);
+  state.write();
+  return state;
+}
+
+function verifyV2(state) {
+  return verifyMutationReportSet(state.contract, state.artifactsDir, {
+    candidateCommit: state.candidate.commit,
+    candidateTree: state.candidate.tree,
+  });
 }
 
 function expectCode(code, action) {
@@ -409,6 +556,18 @@ describe('mutation-composed-report-set-v1 verification', () => {
     }
   });
 
+  it('rejects a mutation-report-set-v2 summary under a v1 contract', () => {
+    const state = composedFixture();
+    state.summary.kind = 'mutation-composed-report-set-v2';
+    put(join(state.artifactsDir, state.contract.summaryPath), state.summary);
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () =>
+      verifyMutationReportSet(state.contract, state.artifactsDir, {
+        candidateCommit: state.candidate.commit,
+        candidateTree: state.candidate.tree,
+      }),
+    );
+  });
+
   it('retains canonical JSON and exact artifact-roster protections for compositions', () => {
     const noncanonical = composedFixture();
     writeFileSync(
@@ -425,5 +584,144 @@ describe('mutation-composed-report-set-v1 verification', () => {
     const roster = composedFixture();
     roster.contract.paths.pop();
     expectCode('SCHEMA_INVALID', () => validateMutationContract(roster.contract, 'contract'));
+  });
+});
+
+describe('mutation-report-set-v2 verification', () => {
+  it('accepts strict all-fresh, all-reused, and mixed compositions', () => {
+    for (const [packageCount, freshCount] of [
+      [4, 4],
+      [4, 0],
+      [4, 2],
+    ]) {
+      const state = composedV2Fixture({ packageCount, freshCount });
+      assert.deepEqual(verifyV2(state), {
+        packageCount,
+        score: 100,
+        statusTotals: totals({ Killed: packageCount }),
+        evidenceSetDigest: state.summary.aggregate.evidenceSetDigest,
+      });
+    }
+  });
+
+  it('requires mandatory v2 metadata even when every package is fresh', () => {
+    for (const mutate of [
+      (state) => delete state.summary.baseline,
+      (state) => delete state.summary.semanticRebindComparison,
+      (state) => delete state.summary.candidate,
+      (state) => delete state.summary.aggregate.reusedDurationMs,
+      (state) => delete state.summary.aggregate.evidenceSetDigest,
+      (state) => delete state.summary.packages[0].evidenceRef,
+      (state) => delete state.summary.packages[0].evidenceRefDigest,
+    ]) {
+      const state = composedV2Fixture({ packageCount: 2, freshCount: 2 });
+      mutate(state);
+      state.write();
+      expectCode('MUTATION_SUMMARY_MISMATCH', () => verifyV2(state));
+    }
+
+    const missing = composedV2Fixture({ packageCount: 2, freshCount: 2 });
+    delete missing.contract.schemaVersion;
+    expectCode('SCHEMA_INVALID', () => validateMutationContract(missing.contract, 'contract'));
+  });
+
+  it('binds immutable per-package evidence references and the evidence set digest', () => {
+    const digest = composedV2Fixture();
+    digest.summary.packages[0].evidenceRefDigest = '0'.repeat(64);
+    digest.write();
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () => verifyV2(digest));
+
+    const set = composedV2Fixture();
+    set.summary.aggregate.evidenceSetDigest = '0'.repeat(64);
+    set.write();
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () => verifyV2(set));
+
+    const reportDigest = composedV2Fixture();
+    reportDigest.summary.packages[0].evidenceRef.reportDigest = '0'.repeat(64);
+    reportDigest.summary.packages[0].reportDigest = '0'.repeat(64);
+    reportDigest.reseal();
+    reportDigest.write();
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () => verifyV2(reportDigest));
+
+    const provenance = composedV2Fixture();
+    provenance.summary.packages[3].evidenceRef.provenance = 'fresh';
+    provenance.summary.packages[3].evidenceRef.baselineCommit = null;
+    provenance.summary.packages[3].evidenceRef.baselineTree = null;
+    provenance.reseal();
+    provenance.write();
+    expectCode('MUTATION_SUMMARY_MISMATCH', () => verifyV2(provenance));
+  });
+
+  it('rejects evidence references that leave the declared package roster', () => {
+    const swapped = composedV2Fixture();
+    const [first, second] = swapped.summary.packages;
+    swapped.summary.packages[0] = second;
+    swapped.summary.packages[1] = first;
+    swapped.reseal();
+    swapped.write();
+    expectCode('MUTATION_ROSTER_MISMATCH', () => verifyV2(swapped));
+
+    const renamed = composedV2Fixture();
+    renamed.summary.packages[0].evidenceRef.workspace = 'packages/elsewhere';
+    renamed.summary.packages[0].workspace = 'packages/elsewhere';
+    renamed.reseal();
+    renamed.write();
+    expectCode('MUTATION_ROSTER_MISMATCH', () => verifyV2(renamed));
+  });
+
+  it('rejects unknown mutation report-set and evidence reference versions', () => {
+    const contractKind = composedV2Fixture();
+    contractKind.contract.kind = 'mutation-report-set-v3';
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () =>
+      validateMutationContract(contractKind.contract, 'contract'),
+    );
+
+    const contractSchema = composedV2Fixture();
+    contractSchema.contract.schemaVersion = '3.0.0';
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () => verifyV2(contractSchema));
+
+    const summaryKind = composedV2Fixture();
+    summaryKind.summary.kind = 'mutation-composed-report-set-v1';
+    summaryKind.write();
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () => verifyV2(summaryKind));
+
+    const refKind = composedV2Fixture();
+    refKind.summary.packages[0].evidenceRef.kind = 'mutation-package-evidence-ref-v3';
+    refKind.reseal();
+    refKind.write();
+    expectCode('MUTATION_VERSION_UNSUPPORTED', () => verifyV2(refKind));
+  });
+
+  it('rejects host paths and credential material inside v2 mutation artifacts', () => {
+    const hostPath = composedV2Fixture();
+    hostPath.summary.baseline.summarySha256 = '/Users/inspector/stynx/mutation/summary.json';
+    hostPath.write();
+    expectCode('ARTIFACT_HOST_PATH', () => verifyV2(hostPath));
+
+    const credential = composedV2Fixture();
+    const reportPath = join(credential.artifactsDir, credential.contract.packages[0].reportPath);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    report.files['src/package-00.ts'].mutants[0].replacement = `gho_${'a'.repeat(36)}`;
+    put(reportPath, report);
+    expectCode('ARTIFACT_CREDENTIAL_MATERIAL', () => verifyV2(credential));
+  });
+
+  it('recomputes package results, thresholds, and durations independently of the summary', () => {
+    const changed = composedV2Fixture();
+    const reportPath = join(changed.artifactsDir, changed.contract.packages[0].reportPath);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    report.files['src/package-00.ts'].mutants[0].status = 'Survived';
+    put(reportPath, report);
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () => verifyV2(changed));
+
+    const duration = composedV2Fixture();
+    duration.summary.aggregate.reusedDurationMs += 1;
+    duration.write();
+    expectCode('MUTATION_SUMMARY_MISMATCH', () => verifyV2(duration));
+
+    const threshold = composedV2Fixture();
+    threshold.summary.packages[0].thresholds.break = 91;
+    threshold.write();
+    expectCode('MUTATION_SUMMARY_MISMATCH', () => verifyV2(threshold));
   });
 });

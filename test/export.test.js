@@ -38,11 +38,145 @@ function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
 
+function mutationV2Artifacts(commit, tree) {
+  const thresholds = { break: 90, high: 100, low: 90 };
+  const packageName = '@fixture/core';
+  const workspace = 'packages/core';
+  const summaryPath = 'mutation/summary.json';
+  const reportPath = 'mutation/packages-core.stryker.json';
+  const resultPath = 'mutation/packages-core.result.json';
+  const statusTotals = {
+    CompileError: 0,
+    Ignored: 0,
+    Killed: 1,
+    NoCoverage: 0,
+    Pending: 0,
+    RuntimeError: 0,
+    Survived: 0,
+    Timeout: 0,
+  };
+  const process = { errorAbsent: true, signal: null, status: 0 };
+  const report = {
+    schemaVersion: '1',
+    projectRoot: '.',
+    thresholds,
+    files: { 'src/core.ts': { language: 'typescript', mutants: [{ id: '0', status: 'Killed' }] } },
+    testFiles: {},
+    config: {},
+    framework: { name: 'StrykerJS', branding: {} },
+  };
+  const reportDigest = sha256Hex(Buffer.from(canonicalize(report)));
+  const packageResult = {
+    schemaVersion: '1.0.0',
+    kind: 'mutation-package-result-v1',
+    packageName,
+    workspace,
+    passed: true,
+    durationMs: 7,
+    toolVersions: { stryker: '9.6.1' },
+    thresholds,
+    score: 100,
+    statusTotals,
+    reportDigest,
+    process,
+  };
+  const resultDigest = sha256Hex(Buffer.from(canonicalize(packageResult)));
+  const evidenceRef = {
+    baselineCommit: null,
+    baselineTree: null,
+    inputProjectionDigest: sha256Hex(Buffer.from(`input:${packageName}`)),
+    kind: 'mutation-package-evidence-ref-v2',
+    packageName,
+    provenance: 'fresh',
+    reportDigest,
+    reportPath,
+    resultDigest,
+    resultPath,
+    workspace,
+  };
+  const evidenceRefDigest = sha256Hex(evidenceRef);
+  const summary = {
+    schemaVersion: '2.0.0',
+    kind: 'mutation-composed-report-set-v2',
+    candidate: { commit, tree },
+    baseline: {
+      commit: 'f'.repeat(40),
+      tree: '9'.repeat(40),
+      summaryBytes: 2048,
+      summarySha256: '8'.repeat(64),
+    },
+    semanticRebindComparison: {
+      kind: 'root-manifest-unchanged-with-historical-input-v1',
+      allowedScriptTransitions: [],
+      canonicalContractBytes: 597,
+      canonicalContractSha256: '7'.repeat(64),
+      comparison: {
+        historicalMutationInputTreeEntries: 'match-explicit-historical-candidate-mode-type-oid',
+        otherMutationInputTreeEntries: 'identical-mode-type-oid',
+        rootManifest: 'source-and-target-identical',
+      },
+      sourceRootManifest: { bytes: 512, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+      targetRootManifest: { bytes: 512, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+    },
+    complete: true,
+    passed: true,
+    packages: [
+      {
+        baselineCommit: null,
+        baselineTree: null,
+        durationMs: 7,
+        evidenceRef,
+        evidenceRefDigest,
+        inputProjectionDigest: evidenceRef.inputProjectionDigest,
+        packageName,
+        passed: true,
+        process,
+        provenance: 'fresh',
+        reportDigest,
+        reportPath,
+        resultDigest,
+        resultPath,
+        score: 100,
+        statusTotals,
+        targetCensus: { targetFileCount: 1, totalMutants: 1 },
+        thresholds,
+        workspace,
+      },
+    ],
+    aggregate: {
+      packageCount: 1,
+      freshPackageCount: 1,
+      reusedPackageCount: 0,
+      durationMs: 7,
+      freshDurationMs: 7,
+      reusedDurationMs: 0,
+      score: 100,
+      statusTotals,
+      evidenceSetDigest: sha256Hex([evidenceRefDigest]),
+    },
+  };
+  return {
+    contract: {
+      kind: 'mutation-report-set-v2',
+      schemaVersion: '2.0.0',
+      expectedPackageCount: 1,
+      summaryPath,
+      packages: [{ packageName, workspace, reportPath, resultPath, thresholds }],
+      paths: [summaryPath, resultPath, reportPath],
+    },
+    files: { [reportPath]: report, [resultPath]: packageResult, [summaryPath]: summary },
+    statusTotals,
+    summary,
+  };
+}
+
 function fixture({
   allowlistedEnv = [],
   environmentValue = {},
   portable = false,
   artifactContent = '{"proof":true}\n',
+  mutation = false,
+  patchMutationSummary,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'devai-export-test-'));
   temporaryDirectories.push(root);
@@ -67,20 +201,32 @@ function fixture({
         inputSelectors: [{ kind: 'exact', pattern: 'input.txt' }],
         toolchainKeys: ['node'],
         allowlistedEnv,
-        outputContract: portable
-          ? { kind: 'files', paths: ['generated.json'], requiredResult: 'pass' }
-          : { kind: 'node-test', requiredResult: 'pass' },
+        outputContract: mutation
+          ? mutationV2Artifacts('0'.repeat(40), '0'.repeat(40)).contract
+          : portable
+            ? { kind: 'files', paths: ['generated.json'], requiredResult: 'pass' }
+            : { kind: 'node-test', requiredResult: 'pass' },
       },
     ],
     profiles: [{ profileId: 'rc', mode: 'fixed', requiredNodes: ['test:one'] }],
   };
   put(join(repo, 'input.txt'), 'input\n');
   if (portable) put(join(repo, 'generated.json'), artifactContent);
+  // Mutation evidence is generated, not committed, so the candidate stays clean and the
+  // summary can bind the exact candidate commit and tree without referring to itself.
+  if (mutation) put(join(repo, '.gitignore'), 'mutation/\n');
   put(join(repo, 'test-tasks.json'), `${JSON.stringify(descriptor, null, 2)}\n`);
   git(repo, ['add', '-A']);
   git(repo, ['commit', '--quiet', '-m', 'candidate']);
   const commit = git(repo, ['rev-parse', 'HEAD']);
   const tree = git(repo, ['rev-parse', 'HEAD^{tree}']);
+  const mutationSet = mutation ? mutationV2Artifacts(commit, tree) : undefined;
+  if (mutationSet !== undefined) {
+    patchMutationSummary?.(mutationSet.summary);
+    for (const [path, value] of Object.entries(mutationSet.files)) {
+      put(join(repo, path), `${canonicalize(value)}\n`);
+    }
+  }
   const toolchain = join(root, 'toolchain.json');
   const environment = join(root, 'environment.json');
   put(toolchain, '{"node":"v24.5.0"}\n');
@@ -93,7 +239,7 @@ function fixture({
     expectedTree: tree,
     toolchain: { node: 'v24.5.0' },
     environment: environmentValue,
-    policySchemaVersion: portable ? '1.1.0' : '1.0.0',
+    policySchemaVersion: portable || mutation ? '1.1.0' : '1.0.0',
   });
   const result = {
     schemaVersion: '1.0.0',
@@ -104,10 +250,17 @@ function fixture({
     dependencyResultDigests: {},
     outputDigests: {
       stdout: '2'.repeat(64),
+      ...((portable || mutation) && { stderr: '3'.repeat(64) }),
       ...(portable && {
-        stderr: '3'.repeat(64),
         'generated.json': sha256Hex(readFileSync(join(repo, 'generated.json'))),
       }),
+      ...(mutationSet !== undefined &&
+        Object.fromEntries(
+          Object.keys(mutationSet.files).map((path) => [
+            path,
+            sha256Hex(readFileSync(join(repo, path))),
+          ]),
+        )),
     },
     startedAt: '2026-08-10T00:00:00.000Z',
     finishedAt: '2026-08-10T00:00:01.000Z',
@@ -117,7 +270,7 @@ function fixture({
   mkdirSync(resultsDir);
   put(join(resultsDir, `${resultDigest}.json`), canonicalize(result));
   const receipt = {
-    schemaVersion: portable ? '1.1.0' : '1.0.0',
+    schemaVersion: portable || mutation ? '1.1.0' : '1.0.0',
     repository: { id: descriptor.repositoryId, commit, tree },
     profile: 'rc',
     taskPolicyDigest: built.taskPolicyDigest,
@@ -159,6 +312,7 @@ function fixture({
     trustStorePath,
     outputDir: join(root, 'exported'),
     built,
+    mutationSet,
   };
 }
 
@@ -282,6 +436,51 @@ describe('trusted candidate evidence export', () => {
       expectCode(code, () => exportCandidateEvidence(exportOptions(state)));
       assert.equal(existsSync(state.outputDir), false);
     }
+  });
+
+  it('preflights and exports a mutation-report-set-v2 contract entirely offline', () => {
+    const preflighted = fixture({ mutation: true });
+    const preflight = preflightCandidateEvidence(exportOptions(preflighted));
+    assert.deepEqual(preflight.artifactPaths, [
+      'mutation/packages-core.result.json',
+      'mutation/packages-core.stryker.json',
+      'mutation/summary.json',
+    ]);
+    assert.equal(existsSync(preflighted.outputDir), false);
+
+    const state = fixture({ mutation: true });
+    assert.equal(exportCandidateEvidence(exportOptions(state)).ok, true);
+    const verified = loadAndVerify({
+      envelopePath: join(state.outputDir, 'envelope.json'),
+      resultsDir: join(state.outputDir, 'results'),
+      artifactsDir: join(state.outputDir, 'artifacts'),
+      taskPolicyPath: join(state.outputDir, 'task-policy.json'),
+      trustStorePath: state.trustStorePath,
+      expectedRepository: 'fixture/repository',
+      expectedCommit: state.commit,
+      expectedTree: state.tree,
+      expectedPolicyDigest: state.built.taskPolicyDigest,
+    });
+    assert.deepEqual(verified.verifiedMutation, [
+      {
+        nodeId: 'test:one',
+        packageCount: 1,
+        score: 100,
+        statusTotals: state.mutationSet.statusTotals,
+        evidenceSetDigest: state.mutationSet.summary.aggregate.evidenceSetDigest,
+      },
+    ]);
+  });
+
+  it('refuses workstation paths inside declared v2 mutation artifacts before signing', () => {
+    const state = fixture({
+      mutation: true,
+      patchMutationSummary: (summary) => {
+        summary.baseline.summarySha256 = '/Users/inspector/stynx/mutation/summary.json';
+      },
+    });
+    expectCode('ARTIFACT_HOST_PATH', () => preflightCandidateEvidence(exportOptions(state)));
+    assert.equal(existsSync(state.outputDir), false);
   });
 
   it('refuses dirty candidates before signing', () => {
