@@ -6,7 +6,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -353,6 +355,55 @@ function invalidPrivateKey(state) {
   return path;
 }
 
+/**
+ * A preload that makes every private-key and signing primitive throw. An export run
+ * against it exits 70 with FORBIDDEN_CRYPTO_OPERATION the moment it touches one, so any
+ * other reported code proves the failure happened before the protected key was used.
+ */
+function cryptoTripwire(state) {
+  const path = join(state.root, 'crypto-tripwire.cjs');
+  put(
+    path,
+    [
+      "const crypto = require('node:crypto');",
+      "const { syncBuiltinESMExports } = require('node:module');",
+      "for (const name of ['createPrivateKey', 'generateKeyPairSync', 'sign']) {",
+      '  crypto[name] = () => { throw new Error(`FORBIDDEN_CRYPTO_OPERATION:${name}`); };',
+      '}',
+      'syncBuiltinESMExports();',
+      '',
+    ].join('\n'),
+  );
+  return path;
+}
+
+function exportCliArguments(state) {
+  return [
+    '--repo',
+    state.repo,
+    '--receipt',
+    state.receiptPath,
+    '--results-dir',
+    state.resultsDir,
+    '--profile',
+    'rc',
+    '--commit',
+    state.commit,
+    '--tree',
+    state.tree,
+    '--toolchain',
+    state.toolchain,
+    '--environment',
+    state.environment,
+    '--public-key',
+    state.publicKeyPath,
+    '--signer-id',
+    'local-rc-signer',
+    '--output-dir',
+    state.outputDir,
+  ];
+}
+
 describe('trusted candidate evidence export', () => {
   it('validates the complete export chain without writing an evidence bundle', () => {
     const state = fixture({ portable: true });
@@ -410,43 +461,8 @@ describe('trusted candidate evidence export', () => {
 
   it('runs CLI preflight with signing and private-key crypto operations disabled', () => {
     const state = fixture({ mutation: true });
-    const tripwire = join(state.root, 'crypto-tripwire.cjs');
-    put(
-      tripwire,
-      [
-        "const crypto = require('node:crypto');",
-        "const { syncBuiltinESMExports } = require('node:module');",
-        "for (const name of ['createPrivateKey', 'generateKeyPairSync', 'sign']) {",
-        "  crypto[name] = () => { throw new Error(`FORBIDDEN_CRYPTO_OPERATION:${name}`); };",
-        '}',
-        'syncBuiltinESMExports();',
-        '',
-      ].join('\n'),
-    );
-    const common = [
-      '--repo',
-      state.repo,
-      '--receipt',
-      state.receiptPath,
-      '--results-dir',
-      state.resultsDir,
-      '--profile',
-      'rc',
-      '--commit',
-      state.commit,
-      '--tree',
-      state.tree,
-      '--toolchain',
-      state.toolchain,
-      '--environment',
-      state.environment,
-      '--public-key',
-      state.publicKeyPath,
-      '--signer-id',
-      'local-rc-signer',
-      '--output-dir',
-      state.outputDir,
-    ];
+    const tripwire = cryptoTripwire(state);
+    const common = exportCliArguments(state);
     const preflight = spawnSync(
       process.execPath,
       ['--require', tripwire, EXPORT_CLI, ...common, '--preflight', 'true'],
@@ -463,6 +479,49 @@ describe('trusted candidate evidence export', () => {
     );
     assert.equal(signing.status, 70);
     assert.match(JSON.parse(signing.stderr).message, /FORBIDDEN_CRYPTO_OPERATION/u);
+    assert.equal(existsSync(state.outputDir), false);
+  });
+
+  it('refuses a symlinked task result in preflight and before any signing operation', () => {
+    const state = fixture();
+    const receipt = JSON.parse(readFileSync(state.receiptPath, 'utf8'));
+    const resultPath = join(state.resultsDir, `${receipt.tasks[0].resultDigest}.json`);
+    // The link target keeps the exact bytes the receipt digest commits to, so the only
+    // thing left for the verifier to refuse is the symbolic link itself.
+    const external = join(state.root, 'external-result.json');
+    renameSync(resultPath, external);
+    symlinkSync(external, resultPath);
+
+    assert.throws(
+      () => preflightCandidateEvidence(exportOptions(state)),
+      (error) =>
+        error.code === 'RESULT_INVALID' &&
+        error.message === 'task result test:one must be a regular non-symlink file',
+    );
+    assert.equal(existsSync(state.outputDir), false);
+
+    const tripwire = cryptoTripwire(state);
+    const common = exportCliArguments(state);
+    const preflight = spawnSync(
+      process.execPath,
+      ['--require', tripwire, EXPORT_CLI, ...common, '--preflight', 'true'],
+      { encoding: 'utf8' },
+    );
+    assert.equal(preflight.status, 2);
+    assert.equal(preflight.stdout, '');
+    assert.equal(JSON.parse(preflight.stderr).code, 'RESULT_INVALID');
+    assert.equal(existsSync(state.outputDir), false);
+
+    // A signing export refuses the same result with the same code: had it reached the
+    // private key or the signature, the tripwire would have exited 70 instead.
+    const signing = spawnSync(
+      process.execPath,
+      ['--require', tripwire, EXPORT_CLI, ...common, '--private-key', state.privateKeyPath],
+      { encoding: 'utf8' },
+    );
+    assert.equal(signing.status, 2);
+    assert.equal(signing.stdout, '');
+    assert.equal(JSON.parse(signing.stderr).code, 'RESULT_INVALID');
     assert.equal(existsSync(state.outputDir), false);
   });
 

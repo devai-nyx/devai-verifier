@@ -1,5 +1,14 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -763,11 +772,25 @@ describe('candidate-independent evidence verification', () => {
     expectCode('SIGNER_UNTRUSTED', () => verify(untrusted));
   });
 
-  it('rejects missing, FAIL, ABORTED, and unknown task results', () => {
+  it('rejects missing, symlinked, FAIL, ABORTED, and unknown task results', () => {
     const missing = fixture();
     const missingTask = missing.receipt.tasks[0];
     unlinkSync(join(missing.resultsDir, `${missingTask.resultDigest}.json`));
     expectCode('INPUT_MISSING', () => verify(missing));
+
+    // The link points at the very bytes the receipt digest commits to, so a verifier
+    // that followed it would report success on a file outside the results directory.
+    const linked = fixture();
+    const linkedPath = join(linked.resultsDir, `${linked.receipt.tasks[0].resultDigest}.json`);
+    const external = join(linked.root, 'external-result.json');
+    renameSync(linkedPath, external);
+    symlinkSync(external, linkedPath);
+    assert.throws(
+      () => verify(linked),
+      (error) =>
+        error.code === 'RESULT_INVALID' &&
+        error.message === 'task result unit:core must be a regular non-symlink file',
+    );
 
     for (const status of ['FAIL', 'ABORTED', 'UNKNOWN']) {
       const state = fixture();

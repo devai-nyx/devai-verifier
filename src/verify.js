@@ -220,6 +220,37 @@ function validateTaskResult(result, label) {
   }
 }
 
+/**
+ * Reads one digest-named task-result file through the same fail-closed file contract the
+ * export staging step applies. The exact path is inspected with lstat before any read, so
+ * a symbolic link is refused here rather than followed into bytes outside the results
+ * directory. Every failure reports a stable code and a message built only from the caller
+ * label, so neither host paths nor file contents leak into verifier output.
+ */
+function readTaskResultFile(resultsDir, resultDigest, label) {
+  const absolute = join(resultsDir, `${resultDigest}.json`);
+  let stat;
+  try {
+    stat = lstatSync(absolute);
+  } catch {
+    throw new VerificationError('INPUT_MISSING', `${label} is unavailable`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new VerificationError('RESULT_INVALID', `${label} must be a regular non-symlink file`);
+  }
+  let text;
+  try {
+    text = readFileSync(absolute, 'utf8');
+  } catch {
+    throw new VerificationError('INPUT_MISSING', `${label} is unreadable`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new VerificationError('MALFORMED_JSON', `${label} is not valid JSON`);
+  }
+}
+
 function artifactPaths(policy) {
   const paths = new Set();
   for (const node of policy.requiredNodes) {
@@ -429,7 +460,7 @@ function verifyValidatedCandidateReceipt({
     if (task.taskKey !== expected.taskKey) {
       throw new VerificationError('TASK_KEY_STALE', `node ${nodeId} has a stale task key`);
     }
-    const result = readJson(join(resultsDir, `${task.resultDigest}.json`), `task result ${nodeId}`);
+    const result = readTaskResultFile(resultsDir, task.resultDigest, `task result ${nodeId}`);
     if (sha256Hex(result) !== task.resultDigest) {
       throw new VerificationError(
         'RESULT_DIGEST_MISMATCH',
