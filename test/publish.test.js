@@ -24,7 +24,9 @@ afterEach(() => {
 });
 
 function git(repo, args) {
-  return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  return execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8',
+  }).trim();
 }
 
 function put(path, value) {
@@ -59,7 +61,11 @@ function fixture() {
         nodeId: 'test:rc',
         taskKey,
         dependencies: [],
-        outputContract: { kind: 'files', paths: ['generated.json'], requiredResult: 'pass' },
+        outputContract: {
+          kind: 'files',
+          paths: ['generated.json'],
+          requiredResult: 'pass',
+        },
       },
     ],
   };
@@ -135,7 +141,17 @@ function fixture() {
   });
   const trustStorePath = join(root, 'trust.json');
   put(trustStorePath, trust);
-  return { root, remote, repo, bundle, trustStorePath, commit, tree, keys, receipt };
+  return {
+    root,
+    remote,
+    repo,
+    bundle,
+    trustStorePath,
+    commit,
+    tree,
+    keys,
+    receipt,
+  };
 }
 
 function mutationV2Artifacts(commit, tree) {
@@ -160,7 +176,12 @@ function mutationV2Artifacts(commit, tree) {
     schemaVersion: '1',
     projectRoot: '.',
     thresholds,
-    files: { 'src/core.ts': { language: 'typescript', mutants: [{ id: '0', status: 'Killed' }] } },
+    files: {
+      'src/core.ts': {
+        language: 'typescript',
+        mutants: [{ id: '0', status: 'Killed' }],
+      },
+    },
     testFiles: {},
     config: {},
     framework: { name: 'StrykerJS', branding: {} },
@@ -215,8 +236,16 @@ function mutationV2Artifacts(commit, tree) {
         otherMutationInputTreeEntries: 'identical-mode-type-oid',
         rootManifest: 'source-and-target-identical',
       },
-      sourceRootManifest: { bytes: 512, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
-      targetRootManifest: { bytes: 512, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+      sourceRootManifest: {
+        bytes: 512,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
+      targetRootManifest: {
+        bytes: 512,
+        gitBlobOid: '1'.repeat(40),
+        sha256: '2'.repeat(64),
+      },
     },
     complete: true,
     passed: true,
@@ -264,7 +293,11 @@ function mutationV2Artifacts(commit, tree) {
       packages: [{ packageName, workspace, reportPath, resultPath, thresholds }],
       paths: [summaryPath, resultPath, reportPath],
     },
-    files: { [reportPath]: report, [resultPath]: packageResult, [summaryPath]: summary },
+    files: {
+      [reportPath]: report,
+      [resultPath]: packageResult,
+      [summaryPath]: summary,
+    },
     statusTotals,
     summary,
   };
@@ -289,7 +322,10 @@ function mutationBundleFixture() {
   put(trustStorePath, {
     schemaVersion: '1.0.0',
     trustedSigners: [
-      { signerId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() },
+      {
+        signerId,
+        publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      },
     ],
     revokedSignerIds: [],
   });
@@ -298,7 +334,12 @@ function mutationBundleFixture() {
     schemaVersion: '1.1.0',
     repositoryId: 'fixture/repository',
     requiredNodes: [
-      { nodeId: 'test:mutation', taskKey, dependencies: [], outputContract: set.contract },
+      {
+        nodeId: 'test:mutation',
+        taskKey,
+        dependencies: [],
+        outputContract: set.contract,
+      },
     ],
   };
   const policyDigest = sha256Hex(policy);
@@ -314,7 +355,11 @@ function mutationBundleFixture() {
       const bytes = Buffer.from(`${canonicalize(state.set.files[path])}\n`);
       put(join(bundle, 'artifacts', path), bytes.toString('utf8'));
       outputDigests[path] = sha256Hex(bytes);
-      artifacts.push({ path, mediaType: 'application/json', sha256: sha256Hex(bytes) });
+      artifacts.push({
+        path,
+        mediaType: 'application/json',
+        sha256: sha256Hex(bytes),
+      });
     }
     const result = {
       schemaVersion: '1.0.0',
@@ -343,7 +388,12 @@ function mutationBundleFixture() {
       schemaVersion: '1.0.0',
       payloadType: PAYLOAD_TYPE,
       payload: payload.toString('base64'),
-      signatures: [{ signerId, signature: sign(null, payload, keys.privateKey).toString('base64') }],
+      signatures: [
+        {
+          signerId,
+          signature: sign(null, payload, keys.privateKey).toString('base64'),
+        },
+      ],
     };
     put(join(bundle, 'envelope.json'), envelope);
     put(join(bundle, 'manifest.json'), {
@@ -390,7 +440,12 @@ describe('protected evidence publication', () => {
     assert.doesNotThrow(() =>
       assertMutationWriteBoundary({
         requiredNodes: [
-          { outputContract: { kind: 'mutation-report-set-v2', schemaVersion: '2.1.0' } },
+          {
+            outputContract: {
+              kind: 'mutation-report-set-v2',
+              schemaVersion: '2.1.0',
+            },
+          },
         ],
       }),
     );
@@ -400,7 +455,10 @@ describe('protected evidence publication', () => {
     const state = fixture();
     const dispatched = [];
     assert.equal(
-      verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }).verified.ok,
+      verifyPreparedBundle({
+        bundleDir: state.bundle,
+        trustStorePath: state.trustStorePath,
+      }).verified.ok,
       true,
     );
     const first = publishCandidateEvidence(options(state, dispatched));
@@ -440,10 +498,12 @@ describe('protected evidence publication', () => {
       const published = publishCandidateEvidence(options(state, []));
       assert.equal(substituted, true);
       assert.equal(published.published, true);
-      const taggedArtifact = execFileSync(
-        'git',
-        ['-C', state.remote, 'show', `${published.tag}:artifacts/generated.json`],
-      );
+      const taggedArtifact = execFileSync('git', [
+        '-C',
+        state.remote,
+        'show',
+        `${published.tag}:artifacts/generated.json`,
+      ]);
       assert.deepEqual(taggedArtifact, capturedBytes);
     } finally {
       fs.readFileSync = originalReadFileSync;
@@ -483,7 +543,10 @@ describe('protected evidence publication', () => {
     const extra = fixture();
     put(join(extra.bundle, 'unexpected.txt'), 'unexpected\n');
     expectCode('BUNDLE_POPULATION_MISMATCH', () =>
-      verifyPreparedBundle({ bundleDir: extra.bundle, trustStorePath: extra.trustStorePath }),
+      verifyPreparedBundle({
+        bundleDir: extra.bundle,
+        trustStorePath: extra.trustStorePath,
+      }),
     );
 
     const state = fixture();
@@ -492,7 +555,9 @@ describe('protected evidence publication', () => {
     const payload = canonicalBytes(state.receipt);
     const envelope = JSON.parse(readFileSync(join(state.bundle, 'envelope.json'), 'utf8'));
     envelope.payload = payload.toString('base64');
-    envelope.signatures[0].signature = sign(null, payload, state.keys.privateKey).toString('base64');
+    envelope.signatures[0].signature = sign(null, payload, state.keys.privateKey).toString(
+      'base64',
+    );
     put(join(state.bundle, 'envelope.json'), envelope);
     const manifest = JSON.parse(readFileSync(join(state.bundle, 'manifest.json'), 'utf8'));
     manifest.envelopeDigest = sha256Hex(envelope);
@@ -510,7 +575,10 @@ describe('protected evidence publication', () => {
     manifest.artifacts[0].sha256 = sha256Hex(Buffer.from(value));
     put(manifestPath, manifest);
     expectCode('ARTIFACT_CREDENTIAL_MATERIAL', () =>
-      verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
+      verifyPreparedBundle({
+        bundleDir: state.bundle,
+        trustStorePath: state.trustStorePath,
+      }),
     );
   });
 
@@ -525,7 +593,10 @@ describe('protected evidence publication', () => {
       const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
       put(policyPath, replacement === null ? replacement : { ...policy, ...replacement });
       expectCode('SCHEMA_INVALID', () =>
-        verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
+        verifyPreparedBundle({
+          bundleDir: state.bundle,
+          trustStorePath: state.trustStorePath,
+        }),
       );
     });
   }
@@ -555,7 +626,10 @@ describe('offline mutation-report-set-v2 bundle verification', () => {
     state.set.summary.aggregate.evidenceSetDigest = '0'.repeat(64);
     state.seal();
     expectCode('ARTIFACT_DIGEST_MISMATCH', () =>
-      verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
+      verifyPreparedBundle({
+        bundleDir: state.bundle,
+        trustStorePath: state.trustStorePath,
+      }),
     );
   });
 
@@ -568,7 +642,10 @@ describe('offline mutation-report-set-v2 bundle verification', () => {
     state.set.summary.aggregate.evidenceSetDigest = sha256Hex([entry.evidenceRefDigest]);
     state.seal();
     expectCode('MUTATION_ROSTER_MISMATCH', () =>
-      verifyPreparedBundle({ bundleDir: state.bundle, trustStorePath: state.trustStorePath }),
+      verifyPreparedBundle({
+        bundleDir: state.bundle,
+        trustStorePath: state.trustStorePath,
+      }),
     );
   });
 });

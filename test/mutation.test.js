@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { canonicalize, sha256Hex } from '../src/canonical.js';
-import { MUTANT_STATUSES, validateMutationContract, verifyMutationReportSet } from '../src/mutation.js';
+import {
+  MUTANT_STATUSES,
+  validateMutationContract,
+  verifyMutationReportSet,
+} from '../src/mutation.js';
 
 const temporaryDirectories = [];
 
@@ -129,8 +133,16 @@ function semanticRebindComparison() {
       otherMutationInputTreeEntries: 'identical-mode-type-oid',
       rootManifest: 'source-and-target-identical',
     },
-    sourceRootManifest: { bytes: 10790, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
-    targetRootManifest: { bytes: 10790, gitBlobOid: '1'.repeat(40), sha256: '2'.repeat(64) },
+    sourceRootManifest: {
+      bytes: 10790,
+      gitBlobOid: '1'.repeat(40),
+      sha256: '2'.repeat(64),
+    },
+    targetRootManifest: {
+      bytes: 10790,
+      gitBlobOid: '1'.repeat(40),
+      sha256: '2'.repeat(64),
+    },
   };
 }
 
@@ -156,7 +168,13 @@ function composedFixture() {
     const resultPath = `mutation/${stem}.result.json`;
     const reportPath = `mutation/${stem}.stryker.json`;
     const thresholds = { high: 100, low: 90, break: 90 };
-    const packageContract = { packageName, workspace, resultPath, reportPath, thresholds };
+    const packageContract = {
+      packageName,
+      workspace,
+      resultPath,
+      reportPath,
+      thresholds,
+    };
     packageContracts.push(packageContract);
     paths.push(resultPath, reportPath);
     const report = {
@@ -269,7 +287,13 @@ function composedV2Fixture({ packageCount = 4, freshCount = 2, extension = 'json
     const resultPath = `mutation/${stem}.result.${extension}`;
     const reportPath = `mutation/${stem}.stryker.${extension}`;
     const thresholds = { high: 100, low: 90, break: 90 };
-    packageContracts.push({ packageName, workspace, resultPath, reportPath, thresholds });
+    packageContracts.push({
+      packageName,
+      workspace,
+      resultPath,
+      reportPath,
+      thresholds,
+    });
     paths.push(resultPath, reportPath);
     const report = {
       schemaVersion: '1',
