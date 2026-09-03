@@ -129,9 +129,9 @@ export function readAbsoluteRegularFile(path, label) {
   // those platform roots before enforcing the no-follow rule so user-controlled
   // descendants are still checked component by component.
   const requested = resolve(path);
-  const absolute = requested.startsWith('/var/')
+  const absolute = process.platform === 'darwin' && requested.startsWith('/var/')
     ? `/private${requested}`
-    : requested.startsWith('/tmp/')
+    : process.platform === 'darwin' && requested.startsWith('/tmp/')
       ? `/private${requested}`
       : requested;
   const root = parse(absolute).root;
