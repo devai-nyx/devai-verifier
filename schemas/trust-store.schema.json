@@ -1,28 +1,74 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://devai.nyx/schemas/trust-store-1.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schemaVersion", "trustedSigners", "revokedSignerIds"],
-  "properties": {
-    "schemaVersion": { "const": "1.0.0" },
-    "trustedSigners": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["signerId", "publicKeyPem"],
-        "properties": {
-          "signerId": { "type": "string", "minLength": 1 },
-          "publicKeyPem": { "type": "string", "minLength": 1 }
-        }
-      }
+  "oneOf": [{ "$ref": "#/$defs/v1" }, { "$ref": "#/$defs/v1_1" }],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
     },
-    "revokedSignerIds": {
+    "publicKeyPem": {
+      "type": "string",
+      "pattern": "^-----BEGIN PUBLIC KEY-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END PUBLIC KEY-----(?:\\r?\\n)?$",
+      "description": "Public SPKI PEM only. The executable verifier additionally requires an Ed25519 key."
+    },
+    "revokedIdentifiers": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string" }
+    },
+    "v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "trustedSigners", "revokedSignerIds"],
+      "properties": {
+        "schemaVersion": { "const": "1.0.0" },
+        "trustedSigners": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["signerId", "publicKeyPem"],
+            "properties": {
+              "signerId": { "$ref": "#/$defs/identifier" },
+              "publicKeyPem": { "$ref": "#/$defs/publicKeyPem" }
+            }
+          }
+        },
+        "revokedSignerIds": { "$ref": "#/$defs/revokedIdentifiers" }
+      }
+    },
+    "v1_1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "trustRootId",
+        "trustedSigners",
+        "revokedSignerIds",
+        "revokedKeyIds"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.1.0" },
+        "trustRootId": { "$ref": "#/$defs/identifier" },
+        "trustedSigners": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["signerId", "keyId", "publicKeyPem"],
+            "properties": {
+              "signerId": { "$ref": "#/$defs/identifier" },
+              "keyId": { "$ref": "#/$defs/identifier" },
+              "publicKeyPem": { "$ref": "#/$defs/publicKeyPem" }
+            }
+          }
+        },
+        "revokedSignerIds": { "$ref": "#/$defs/revokedIdentifiers" },
+        "revokedKeyIds": { "$ref": "#/$defs/revokedIdentifiers" }
+      }
     }
   }
 }

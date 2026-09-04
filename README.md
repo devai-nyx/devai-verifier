@@ -109,6 +109,28 @@ The verifier, task policy, trusted public keys, and revocations must be controll
 outside the candidate repository. A candidate must never approve its own signer,
 policy digest, or verifier implementation.
 
+## Detached path-free trust API
+
+`src/trust.js` is the canonical pure trust boundary for protected hosts that
+verify a detached transcript. It accepts parsed inert JSON and exact `Buffer`
+values only: it does not read paths, sign, execute a command, make a network
+request, or establish that a test ran.
+
+- `resolveTrustedSigner` is the shared legacy receipt resolver. Its optional
+  expectations preserve legacy receipt compatibility.
+- `resolveDetachedSigner` requires a strict `1.1.0` external trust store and
+  all four independently supplied identity pins: signer ID, trust-root ID,
+  canonical trust-store SHA-256, and key ID.
+- `verifyDetachedSignature` takes those same pins, `algorithm: 'ed25519'`, and
+  the exact transcript and 64-byte signature `Buffer`s. It verifies only the
+  cryptographic statement over those bytes.
+
+The detached path supports only public SPKI Ed25519 PEMs. Private PEMs, other
+algorithms, missing pins, non-`Buffer` byte inputs, revoked signer/key IDs, and
+any trust-store shape other than strict `1.1.0` are refused. The trust store and
+all four pins are protected caller inputs; neither a candidate path nor a
+callback supplies trust authority.
+
 ## Inputs
 
 - A signed envelope containing canonical candidate-receipt JSON.
