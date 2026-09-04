@@ -223,14 +223,18 @@ export function resolveDetachedSigner(options) {
   return resolve(detachedOptions(options), true);
 }
 
-/** Verify the exact transcript bytes; this is not evidence of test execution. */
+/**
+ * Verify exact bytes, not test execution or payload semantics. Callers must
+ * independently reconstruct a protocol/domain-bound transcript before passing
+ * it here; this primitive intentionally adds no implicit prefix or encoding.
+ */
 export function verifyDetachedSignature(options) {
   const captured = detachedOptions(options, ['payloadBytes', 'signatureBytes']);
   const signer = resolve(captured, true);
   const payload = captureBytes(captured.payloadBytes);
   const signature = captureBytes(captured.signatureBytes);
   if (signature.length !== 64) {
-    reject('SCHEMA_INVALID', 'detached signature requires payload bytes and a 64-byte signature');
+    reject('SCHEMA_INVALID', 'detached signature must contain exactly 64 bytes');
   }
   if (!verify(null, payload, publicKey(signer.publicKeyPem), signature)) {
     reject('SIGNATURE_INVALID', 'detached signature is invalid');

@@ -253,14 +253,16 @@ function verifyArtifacts(
   mutationVerification = {},
 ) {
   const expectedPaths = artifactPaths(policy);
-  if (expectedPaths.length === 0) return { paths: [], mutation: [] };
-  if (typeof artifactsDir !== 'string') {
+  // Legacy results did not declare an exact stdout/stderr/artifact population.
+  // A pathless v1.1 contract still declares exactly the two stream digests.
+  if (policy.schemaVersion === '1.0.0') return { paths: [], mutation: [] };
+  if (expectedPaths.length > 0 && typeof artifactsDir !== 'string') {
     throw new VerificationError(
       'ARTIFACTS_MISSING',
       'schema 1.1 output artifacts directory is required',
     );
   }
-  if (!allowAdditionalArtifactFiles) {
+  if (!allowAdditionalArtifactFiles && typeof artifactsDir === 'string') {
     let actualPaths;
     try {
       actualPaths = filesBelow(resolve(artifactsDir)).sort();
@@ -282,8 +284,6 @@ function verifyArtifacts(
   for (const [nodeId, result] of results) {
     const outputContract = policyById.get(nodeId).outputContract;
     const paths = outputContract.paths ?? [];
-    const mutationV21 =
-      outputContract.kind === 'mutation-report-set-v2' && outputContract.schemaVersion === '2.1.0';
     const expectedOutputNames = ['stderr', 'stdout', ...paths].sort();
     const actualOutputNames = Object.keys(result.outputDigests).sort();
     if (
@@ -296,21 +296,6 @@ function verifyArtifacts(
       );
     }
     for (const path of paths) {
-      if (mutationV21) {
-        const bytes = readRootRelativeRegularFile(artifactsDir, path, `artifact ${path}`);
-        validateArtifactContent({
-          bytes,
-          path,
-          mediaType: artifactMediaType(path),
-        });
-        if (result.outputDigests[path] !== sha256Hex(bytes)) {
-          throw new VerificationError(
-            'ARTIFACT_DIGEST_MISMATCH',
-            `artifact ${path} digest does not match`,
-          );
-        }
-        continue;
-      }
       const bytes = readRootRelativeRegularFile(artifactsDir, path, `artifact ${path}`);
       validateArtifactContent({
         bytes,
@@ -643,13 +628,7 @@ export function loadAndVerify(options) {
       throw new VerificationError('MALFORMED_JSON', `${label} is not valid JSON`);
     }
   };
-  let trustStore;
-  try {
-    trustStore = parseSafeJson(options.trustStorePath, 'trust store');
-  } catch (error) {
-    if (error instanceof VerificationError) throw error;
-    throw new VerificationError('MALFORMED_JSON', 'trust store is not valid JSON');
-  }
+  const trustStore = parseSafeJson(options.trustStorePath, 'trust store');
   return verifyCandidateEvidence({
     ...options,
     envelope: parseSafeJson(options.envelopePath, 'signed envelope'),
