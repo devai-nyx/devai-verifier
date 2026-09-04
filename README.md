@@ -125,6 +125,11 @@ request, or establish that a test ran.
   the exact transcript and 64-byte signature `Buffer`s. It verifies only the
   cryptographic statement over those bytes.
 
+A cryptographically valid arbitrary payload is not lifecycle evidence. The
+protected host must construct, and offline verification must independently
+reconstruct, the protocol/domain-bound transcript before this call; DEVAI
+export uses its fixed `devai.release-export-transcript-json.v1` binding.
+
 The detached path supports only public SPKI Ed25519 PEMs. Private PEMs, other
 algorithms, missing pins, non-`Buffer` byte inputs, revoked signer/key IDs, and
 any trust-store shape other than strict `1.1.0` are refused. The trust store and
