@@ -17,6 +17,7 @@ import {
   verifyMutationReportSet,
 } from './mutation.js';
 import { readAbsoluteRegularFile, readRootRelativeRegularFile } from './safe-path.js';
+import { resolveTrustedSigner } from './trust.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
@@ -95,56 +96,6 @@ export function validateTaskPolicy(policy) {
     visited.add(nodeId);
   };
   for (const nodeId of nodeIds) visit(nodeId);
-}
-
-function validateTrustStore(trust) {
-  const v11 = trust?.schemaVersion === '1.1.0';
-  assertExactKeys(
-    trust,
-    v11
-      ? ['revokedKeyIds', 'revokedSignerIds', 'schemaVersion', 'trustedSigners', 'trustRootId']
-      : ['revokedSignerIds', 'schemaVersion', 'trustedSigners'],
-    'trust store',
-  );
-  if (trust.schemaVersion !== '1.0.0' && !v11) {
-    throw new VerificationError('SCHEMA_INVALID', 'unsupported trust-store schemaVersion');
-  }
-  if (v11) assertString(trust.trustRootId, 'trust store trustRootId', IDENTIFIER);
-  if (!Array.isArray(trust.trustedSigners) || trust.trustedSigners.length === 0) {
-    throw new VerificationError('SCHEMA_INVALID', 'trustedSigners must be nonempty');
-  }
-  const signerIds = [];
-  for (const [index, signer] of trust.trustedSigners.entries()) {
-    const label = `trustedSigners[${index}]`;
-    assertExactKeys(
-      signer,
-      v11 ? ['keyId', 'publicKeyPem', 'signerId'] : ['publicKeyPem', 'signerId'],
-      label,
-    );
-    assertString(signer.signerId, `${label}.signerId`, IDENTIFIER);
-    if (v11) assertString(signer.keyId, `${label}.keyId`, IDENTIFIER);
-    assertString(signer.publicKeyPem, `${label}.publicKeyPem`);
-    let key;
-    try {
-      key = createPublicKey(signer.publicKeyPem);
-    } catch (error) {
-      throw new VerificationError(
-        'SCHEMA_INVALID',
-        `${label} has an invalid public key: ${error.message}`,
-      );
-    }
-    if (key.asymmetricKeyType !== 'ed25519') {
-      throw new VerificationError('SCHEMA_INVALID', `${label} must contain an Ed25519 public key`);
-    }
-    signerIds.push(signer.signerId);
-  }
-  assertUniqueStrings(signerIds, 'trusted signer IDs');
-  assertUniqueStrings(trust.revokedSignerIds, 'revokedSignerIds');
-  if (v11) {
-    assertUniqueStrings(trust.revokedKeyIds, 'revokedKeyIds');
-    const keyIds = trust.trustedSigners.map((entry) => entry.keyId);
-    assertUniqueStrings(keyIds, 'trusted key IDs');
-  }
 }
 
 function validateEnvelope(envelope) {
@@ -630,44 +581,17 @@ export function verifyCandidateEvidence({
     },
   };
   validateVerificationContext(context);
-  validateTrustStore(trustStore);
   validateEnvelope(envelope);
 
   const signature = envelope.signatures[0];
-  if (expectedSignerId !== undefined && signature.signerId !== expectedSignerId) {
-    throw new VerificationError(
-      'SIGNER_MISMATCH',
-      'signed envelope signer differs from expected signer',
-    );
-  }
-  if (
-    expectedTrustStoreDigest !== undefined &&
-    sha256Hex(trustStore) !== expectedTrustStoreDigest
-  ) {
-    throw new VerificationError(
-      'TRUST_STORE_MISMATCH',
-      'trust store digest differs from expected digest',
-    );
-  }
-  if (expectedTrustRootId !== undefined && trustStore.trustRootId !== expectedTrustRootId) {
-    throw new VerificationError(
-      'TRUST_ROOT_MISMATCH',
-      'trust root differs from expected trust root',
-    );
-  }
-  if (trustStore.revokedSignerIds.includes(signature.signerId)) {
-    throw new VerificationError('SIGNER_REVOKED', `signer ${signature.signerId} is revoked`);
-  }
-  const signer = trustStore.trustedSigners.find((entry) => entry.signerId === signature.signerId);
-  if (signer === undefined) {
-    throw new VerificationError('SIGNER_UNTRUSTED', `signer ${signature.signerId} is not trusted`);
-  }
-  if (expectedKeyId !== undefined && signer.keyId !== expectedKeyId) {
-    throw new VerificationError('KEY_MISMATCH', 'trusted signer key differs from expected key');
-  }
-  if (trustStore.revokedKeyIds?.includes(signer.keyId)) {
-    throw new VerificationError('SIGNER_REVOKED', 'signer key is revoked');
-  }
+  const signer = resolveTrustedSigner({
+    trustStore,
+    signerId: signature.signerId,
+    expectedSignerId,
+    expectedTrustRootId,
+    expectedTrustStoreDigest,
+    expectedKeyId,
+  });
 
   const payloadBytes = Buffer.from(envelope.payload, 'base64');
   if (
