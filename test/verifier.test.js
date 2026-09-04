@@ -170,6 +170,30 @@ function replaceResult(state, nodeId, nextResult) {
   state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
 }
 
+function readResult(state, nodeId) {
+  const task = state.receipt.tasks.find((entry) => entry.nodeId === nodeId);
+  if (task === undefined) throw new Error(`missing fixture task ${nodeId}`);
+  return JSON.parse(readFileSync(join(state.resultsDir, `${task.resultDigest}.json`), 'utf8'));
+}
+
+function pathlessV11Fixture() {
+  const state = fixture();
+  state.taskPolicy.schemaVersion = '1.1.0';
+  for (const node of state.taskPolicy.requiredNodes) node.outputContract = { kind: 'none' };
+  state.policyDigest = sha256Hex(state.taskPolicy);
+  state.receipt.schemaVersion = '1.1.0';
+  state.receipt.taskPolicyDigest = state.policyDigest;
+  for (const nodeId of ['unit:core', 'contract:cli']) {
+    const next = readResult(state, nodeId);
+    next.outputDigests = {
+      stderr: sha256Hex(Buffer.from(`stderr:${nodeId}`)),
+      stdout: sha256Hex(Buffer.from(`stdout:${nodeId}`)),
+    };
+    replaceResult(state, nodeId, next);
+  }
+  return state;
+}
+
 function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
@@ -685,19 +709,34 @@ describe('candidate-independent evidence verification', () => {
   });
 
   it('accepts schema 1.1 policies with immutable output contracts', () => {
-    const state = fixture();
-    state.taskPolicy.schemaVersion = '1.1.0';
-    for (const node of state.taskPolicy.requiredNodes) {
-      node.outputContract = { kind: 'none' };
-    }
-    state.policyDigest = sha256Hex(state.taskPolicy);
-    state.receipt.schemaVersion = '1.1.0';
-    state.receipt.taskPolicyDigest = state.policyDigest;
-    state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
+    const state = pathlessV11Fixture();
     assert.equal(verify(state).ok, true);
 
     delete state.taskPolicy.requiredNodes[0].outputContract;
     expectCode('SCHEMA_INVALID', () => verify(state));
+  });
+
+  it('closes pathless schema 1.1 output and supplied artifact populations', () => {
+    const exact = pathlessV11Fixture();
+    assert.equal(verify(exact).ok, true);
+
+    const extraOutput = pathlessV11Fixture();
+    const extraResult = readResult(extraOutput, 'unit:core');
+    extraResult.outputDigests.unexpected = sha256Hex(Buffer.from('unexpected'));
+    replaceResult(extraOutput, 'unit:core', extraResult);
+    expectCode('OUTPUT_POPULATION_MISMATCH', () => verify(extraOutput));
+
+    const missingOutput = pathlessV11Fixture();
+    const missingResult = readResult(missingOutput, 'unit:core');
+    delete missingResult.outputDigests.stdout;
+    replaceResult(missingOutput, 'unit:core', missingResult);
+    expectCode('OUTPUT_POPULATION_MISMATCH', () => verify(missingOutput));
+
+    const undeclaredArtifact = pathlessV11Fixture();
+    const artifactsDir = join(undeclaredArtifact.root, 'artifacts');
+    mkdirSync(artifactsDir);
+    writeFileSync(join(artifactsDir, 'undeclared.txt'), 'must be rejected\n');
+    expectCode('ARTIFACT_POPULATION_MISMATCH', () => verify(undeclaredArtifact, { artifactsDir }));
   });
 
   it('rejects a signed mutation output contract that declares no artifact paths', () => {
