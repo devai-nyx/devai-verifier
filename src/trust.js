@@ -86,7 +86,7 @@ function unique(values) {
 function publicKey(pem) {
   // createPublicKey also accepts private PEMs. The public trust store must not.
   if (
-    !/^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END PUBLIC KEY-----(?:\r?\n)?$/u.test(
+    !/^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END PUBLIC KEY-----(?:\r?\n)?(?![\s\S])/u.test(
       pem,
     )
   ) {
