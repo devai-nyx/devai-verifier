@@ -194,6 +194,77 @@ function pathlessV11Fixture() {
   return state;
 }
 
+function artifactFixture() {
+  const state = pathlessV11Fixture();
+  const artifactsDir = join(state.root, 'artifacts');
+  const artifactPath = 'generated/proof.json';
+  const artifactBytes = Buffer.from('{"proof":true}\n');
+  mkdirSync(dirname(join(artifactsDir, artifactPath)), { recursive: true });
+  writeFileSync(join(artifactsDir, artifactPath), artifactBytes);
+
+  state.taskPolicy.requiredNodes[0].outputContract = {
+    kind: 'generated-proof',
+    paths: [artifactPath],
+  };
+  const unit = readResult(state, 'unit:core');
+  unit.outputDigests = {
+    stderr: sha256Hex(Buffer.from('stderr:unit:core')),
+    stdout: sha256Hex(Buffer.from('stdout:unit:core')),
+    [artifactPath]: sha256Hex(artifactBytes),
+  };
+  replaceResult(state, 'unit:core', unit);
+
+  const contract = readResult(state, 'contract:cli');
+  contract.outputDigests = {
+    stderr: sha256Hex(Buffer.from('stderr:contract:cli')),
+    stdout: sha256Hex(Buffer.from('stdout:contract:cli')),
+  };
+  replaceResult(state, 'contract:cli', contract);
+  state.policyDigest = sha256Hex(state.taskPolicy);
+  state.receipt.taskPolicyDigest = state.policyDigest;
+  state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
+  return { ...state, artifactsDir, artifactBytes, artifactPath };
+}
+
+function namespaceCensusFixture() {
+  const state = artifactFixture();
+  state.taskPolicy.schemaVersion = '1.2.0';
+  state.taskPolicy.inputProjection = {
+    schemaVersion: '1.0.0',
+    source: 'exact-candidate-tree',
+    digest: 'f'.repeat(64),
+    excludedPrefixes: ['.devai/state/', 'node_modules/'],
+  };
+  for (const node of state.taskPolicy.requiredNodes) node.outputContract = { kind: 'none' };
+  state.taskPolicy.requiredNodes[0].outputContract = {
+    kind: 'none',
+    generated_namespaces: [{ prefix: 'generated/' }],
+  };
+  state.policyDigest = sha256Hex(state.taskPolicy);
+  state.receipt.taskPolicyDigest = state.policyDigest;
+  state.envelope = signedEnvelope(state.receipt, state.approved.privateKey);
+  const unit = readResult(state, 'unit:core');
+  const namespaceCensus = {
+    schemaVersion: '1.0.0',
+    namespaces: [
+      {
+        taskNode: 'unit:core',
+        prefix: 'generated/',
+        inputDigest: unit.inputDigest,
+        entries: [
+          {
+            path: state.artifactPath,
+            mode: '100644',
+            sha256: sha256Hex(state.artifactBytes),
+            size: state.artifactBytes.length,
+          },
+        ],
+      },
+    ],
+  };
+  return { ...state, namespaceCensus };
+}
+
 function expectCode(code, action) {
   assert.throws(action, (error) => error?.code === code);
 }
@@ -714,6 +785,156 @@ describe('candidate-independent evidence verification', () => {
 
     delete state.taskPolicy.requiredNodes[0].outputContract;
     expectCode('SCHEMA_INVALID', () => verify(state));
+  });
+
+  it('accepts only the required 1.2 task-policy input projection', () => {
+    const current = pathlessV11Fixture();
+    current.taskPolicy.schemaVersion = '1.2.0';
+    current.taskPolicy.inputProjection = {
+      schemaVersion: '1.0.0',
+      source: 'exact-candidate-tree',
+      digest: 'f'.repeat(64),
+      excludedPrefixes: ['.devai/state/', 'node_modules/'],
+    };
+    current.policyDigest = sha256Hex(current.taskPolicy);
+    current.receipt.taskPolicyDigest = current.policyDigest;
+    current.envelope = signedEnvelope(current.receipt, current.approved.privateKey);
+    assert.equal(verify(current).ok, true);
+
+    const malformed = pathlessV11Fixture();
+    malformed.taskPolicy.schemaVersion = '1.2.0';
+    malformed.taskPolicy.inputProjection = {
+      schemaVersion: '1.0.0',
+      source: 'exact-candidate-tree',
+      digest: 'f'.repeat(64),
+      excludedPrefixes: ['.devai/state/'],
+      unexpected: true,
+    };
+    malformed.policyDigest = sha256Hex(malformed.taskPolicy);
+    malformed.receipt.taskPolicyDigest = malformed.policyDigest;
+    malformed.envelope = signedEnvelope(malformed.receipt, malformed.approved.privateKey);
+    expectCode('SCHEMA_INVALID', () => verify(malformed));
+
+    const missing = pathlessV11Fixture();
+    missing.taskPolicy.schemaVersion = '1.2.0';
+    missing.taskPolicy.inputProjection = {
+      schemaVersion: '1.0.0',
+      source: 'exact-candidate-tree',
+      digest: 'f'.repeat(64),
+    };
+    missing.policyDigest = sha256Hex(missing.taskPolicy);
+    missing.receipt.taskPolicyDigest = missing.policyDigest;
+    missing.envelope = signedEnvelope(missing.receipt, missing.approved.privateKey);
+    expectCode('SCHEMA_INVALID', () => verify(missing));
+
+    const legacy = pathlessV11Fixture();
+    legacy.taskPolicy.inputProjection = {
+      schemaVersion: '1.0.0',
+      source: 'exact-candidate-tree',
+      digest: 'f'.repeat(64),
+      excludedPrefixes: ['.devai/state/'],
+    };
+    legacy.policyDigest = sha256Hex(legacy.taskPolicy);
+    legacy.receipt.taskPolicyDigest = legacy.policyDigest;
+    legacy.envelope = signedEnvelope(legacy.receipt, legacy.approved.privateKey);
+    expectCode('SCHEMA_INVALID', () => verify(legacy));
+  });
+
+  it('gives byte-source results and artifacts the same verification semantics as directories', () => {
+    const state = artifactFixture();
+    const directoryVerified = verify(state, { artifactsDir: state.artifactsDir });
+    const calls = [];
+    const byteVerified = verify(state, {
+      resultsDir: undefined,
+      artifactsDir: undefined,
+      readEvidenceFile(kind, identity, label) {
+        calls.push({ kind, identity, label });
+        if (kind === 'result') {
+          return readFileSync(join(state.resultsDir, `${identity}.json`));
+        }
+        if (kind === 'artifact') return readFileSync(join(state.artifactsDir, identity));
+        throw new Error('unknown evidence kind');
+      },
+    });
+
+    assert.deepEqual(byteVerified, directoryVerified);
+    assert.deepEqual(
+      calls.map(({ kind, identity }) => [kind, identity]).sort(),
+      [
+        ['artifact', state.artifactPath],
+        ...state.receipt.tasks.map(({ resultDigest }) => ['result', resultDigest]),
+      ].sort(),
+    );
+
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () =>
+      verify(state, {
+        resultsDir: undefined,
+        artifactsDir: undefined,
+        readEvidenceFile(kind, identity) {
+          if (kind === 'artifact') return Buffer.from('changed artifact\n');
+          return readFileSync(join(state.resultsDir, `${identity}.json`));
+        },
+      }),
+    );
+  });
+
+  it('binds a v1.2 digest-only namespace census to exactly one task output population', () => {
+    const state = namespaceCensusFixture();
+    assert.equal(
+      verify(state, { artifactsDir: state.artifactsDir, namespaceCensus: state.namespaceCensus }).ok,
+      true,
+    );
+
+    const missing = namespaceCensusFixture();
+    missing.namespaceCensus.namespaces[0].entries = [];
+    expectCode('SCHEMA_INVALID', () =>
+      verify(missing, { artifactsDir: missing.artifactsDir, namespaceCensus: missing.namespaceCensus }),
+    );
+
+    const foreign = namespaceCensusFixture();
+    foreign.namespaceCensus.namespaces[0].taskNode = 'foreign:task';
+    expectCode('NODE_POPULATION_MISMATCH', () =>
+      verify(foreign, { artifactsDir: foreign.artifactsDir, namespaceCensus: foreign.namespaceCensus }),
+    );
+
+    const undeclared = namespaceCensusFixture();
+    undeclared.namespaceCensus.namespaces[0].prefix = 'other/';
+    undeclared.namespaceCensus.namespaces[0].entries[0].path = 'other/proof.json';
+    expectCode('SCHEMA_INVALID', () =>
+      verify(undeclared, {
+        artifactsDir: undeclared.artifactsDir,
+        namespaceCensus: undeclared.namespaceCensus,
+      }),
+    );
+
+    const duplicate = namespaceCensusFixture();
+    duplicate.namespaceCensus.namespaces[0].entries.push({
+      ...duplicate.namespaceCensus.namespaces[0].entries[0],
+    });
+    expectCode('SCHEMA_INVALID', () =>
+      verify(duplicate, {
+        artifactsDir: duplicate.artifactsDir,
+        namespaceCensus: duplicate.namespaceCensus,
+      }),
+    );
+
+    const digestDrift = namespaceCensusFixture();
+    digestDrift.namespaceCensus.namespaces[0].entries[0].sha256 = 'e'.repeat(64);
+    expectCode('ARTIFACT_DIGEST_MISMATCH', () =>
+      verify(digestDrift, {
+        artifactsDir: digestDrift.artifactsDir,
+        namespaceCensus: digestDrift.namespaceCensus,
+      }),
+    );
+
+    const inputDrift = namespaceCensusFixture();
+    inputDrift.namespaceCensus.namespaces[0].inputDigest = 'd'.repeat(64);
+    expectCode('INPUT_DIGEST_MISMATCH', () =>
+      verify(inputDrift, {
+        artifactsDir: inputDrift.artifactsDir,
+        namespaceCensus: inputDrift.namespaceCensus,
+      }),
+    );
   });
 
   it('closes pathless schema 1.1 output and supplied artifact populations', () => {
