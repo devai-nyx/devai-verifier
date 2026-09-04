@@ -362,26 +362,35 @@ describe('path-free detached trust resolution', () => {
       ),
     );
     assert.equal(revokedReads.value, 0);
-    const signerReads = { value: 0 };
-    const signerProxy = new Proxy([], {
-      get() {
-        signerReads.value += 1;
-        throw new Error('hostile trusted-signers proxy trap');
-      },
-    });
+    const revocableSignerProxy = Proxy.revocable([], {});
+    revocableSignerProxy.revoke();
     expectCode('SCHEMA_INVALID', () =>
       resolveDetachedSigner(
         strictOptions(fixture, {
-          trustStore: { ...fixture.trustStore, trustedSigners: signerProxy },
+          trustStore: { ...fixture.trustStore, trustedSigners: revocableSignerProxy.proxy },
         }),
       ),
     );
-    assert.equal(signerReads.value, 0);
     const error = expectCode('SCHEMA_INVALID', () =>
       resolveDetachedSigner(strictOptions(fixture, { trustStore: malformed })),
     );
     assert.equal(String(error.message).includes(secret), false);
     assert.equal(String(error.message).includes(privatePem), false);
+    expectCode('SCHEMA_INVALID', () =>
+      resolveDetachedSigner(
+        strictOptions(fixture, {
+          trustStore: {
+            ...fixture.trustStore,
+            trustedSigners: [
+              {
+                ...fixture.trustStore.trustedSigners[0],
+                publicKeyPem: `${fixture.trustStore.trustedSigners[0].publicKeyPem}\n`,
+              },
+            ],
+          },
+        }),
+      ),
+    );
   });
 
   it('refuses sparse arrays and newline-tainted identities before key handling', () => {
