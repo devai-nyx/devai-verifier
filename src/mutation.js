@@ -18,6 +18,12 @@ import {
   validateMutationContractV21,
   verifyMutationReportSetV21,
 } from './mutation-v21.js';
+import {
+  MUTATION_V22_SCHEMA,
+  finalizeMutationReportSetV22,
+  validateMutationContractV22,
+  verifyMutationReportSetV22,
+} from './mutation-v22.js';
 import { readRootRelativeRegularFile } from './safe-path.js';
 
 const PACKAGE_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/u;
@@ -483,6 +489,12 @@ function validateContractRoster(contract, label) {
 }
 
 export function validateMutationContract(contract, label) {
+  // Explicit forward dispatch: the v2 contract kind is shared, so the schema
+  // version selects the branch and no branch ever reads another branch's document.
+  if (contract?.kind === CONTRACT_V2 && contract?.schemaVersion === MUTATION_V22_SCHEMA) {
+    validateMutationContractV22(contract, label);
+    return;
+  }
   if (contract?.kind === CONTRACT_V2 && contract?.schemaVersion === MUTATION_V21_SCHEMA) {
     validateMutationContractV21(contract, label);
     return;
@@ -804,30 +816,32 @@ function validateEvidenceBinding(entry, expectedRef, fresh, index) {
 
 export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   validateMutationContract(contract, 'mutation output contract');
-  if (contract.schemaVersion === MUTATION_V21_SCHEMA) {
-    return verifyMutationReportSetV21(
-      contract,
-      (path, label) => {
-        const raw = readRootRelativeRegularFile(artifactsDir, path, label);
-        validateArtifactContent({
-          bytes: raw,
-          path,
-          mediaType: 'application/json',
-        });
-        let value;
-        try {
-          value = JSON.parse(raw.toString('utf8'));
-        } catch {
-          throw new VerificationError('MUTATION_REPORT_INVALID', `${label} is not valid JSON`);
-        }
-        const bytes = canonicalBytes(value);
-        if (!raw.equals(bytes) && !raw.equals(Buffer.concat([bytes, Buffer.from('\n')]))) {
-          throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
-        }
-        return { value, bytes };
-      },
-      options,
-    );
+  if (
+    contract.schemaVersion === MUTATION_V21_SCHEMA ||
+    contract.schemaVersion === MUTATION_V22_SCHEMA
+  ) {
+    const readArtifact = (path, label) => {
+      const raw = readRootRelativeRegularFile(artifactsDir, path, label);
+      validateArtifactContent({
+        bytes: raw,
+        path,
+        mediaType: 'application/json',
+      });
+      let value;
+      try {
+        value = JSON.parse(raw.toString('utf8'));
+      } catch {
+        throw new VerificationError('MUTATION_REPORT_INVALID', `${label} is not valid JSON`);
+      }
+      const bytes = canonicalBytes(value);
+      if (!raw.equals(bytes) && !raw.equals(Buffer.concat([bytes, Buffer.from('\n')]))) {
+        throw new VerificationError('NON_CANONICAL_JSON', `${label} is not canonical JSON`);
+      }
+      return { value, bytes };
+    };
+    return contract.schemaVersion === MUTATION_V22_SCHEMA
+      ? verifyMutationReportSetV22(contract, readArtifact, options)
+      : verifyMutationReportSetV21(contract, readArtifact, options);
   }
   const version = mutationContractVersion(contract.kind, 'mutation output contract');
   const inspect = (path) => (version === 2 ? path : undefined);
@@ -1023,4 +1037,11 @@ export function verifyMutationReportSet(contract, artifactsDir, options = {}) {
   };
 }
 
-export { EVIDENCE_REF_KIND, MUTANT_STATUSES, finalizeMutationReportSetV21 };
+export {
+  EVIDENCE_REF_KIND,
+  MUTANT_STATUSES,
+  finalizeMutationReportSetV21,
+  finalizeMutationReportSetV22,
+  validateMutationContractV22,
+  verifyMutationReportSetV22,
+};

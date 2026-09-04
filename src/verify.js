@@ -512,6 +512,7 @@ export function verifyCandidateReceiptEvidence({
   artifactsDir,
   allowAdditionalArtifactFiles = false,
   resolveReuseOrigin,
+  mutationExpectations,
 }) {
   const context = {
     resultsDir,
@@ -524,6 +525,10 @@ export function verifyCandidateReceiptEvidence({
     artifactsDir,
     allowAdditionalArtifactFiles,
     mutationVerification: {
+      // Independent protected expectations only. A forward mutation branch that
+      // needs them refuses when the caller does not supply them; nothing here is
+      // inferred from the candidate, its receipt or its summary.
+      ...mutationExpectations,
       mutationVerificationMode: 'certify',
       resolveReuseOrigin,
     },
@@ -549,6 +554,7 @@ export function verifyCandidateEvidence({
   expectedKeyId,
   expectedResultDigests,
   resolveReuseOrigin,
+  mutationExpectations,
 }) {
   const context = {
     resultsDir,
@@ -561,6 +567,7 @@ export function verifyCandidateEvidence({
     artifactsDir,
     expectedResultDigests,
     mutationVerification: {
+      ...mutationExpectations,
       mutationVerificationMode: 'offline',
       ...(resolveReuseOrigin !== undefined && { resolveReuseOrigin }),
     },

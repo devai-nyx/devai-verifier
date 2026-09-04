@@ -387,8 +387,21 @@ function denyReuse(message) {
  * returned the exact producing receipt and composition that the reference names.
  * Offline verification deliberately does not call it: it relies on the current
  * signed semantic receipt after certify has performed this check.
+ *
+ * `branch` selects the exact contract version this origin must have been produced
+ * under. It is either a fixed descriptor or a selector invoked once with the
+ * single resolved pair, which lets a forward caller accept a genuine producing
+ * document from any version branch it explicitly supports while still checking it
+ * against that branch's own schema string and digest domains. A composition is
+ * never reinterpreted under another branch's domains, and the resolver is invoked
+ * exactly once regardless.
  */
-function validateTrustedReuseOrigin(origin, entry, options) {
+function validateTrustedReuseOrigin(
+  origin,
+  entry,
+  options,
+  branch = { schemaVersion: MUTATION_V21_SCHEMA, domains: DOMAINS },
+) {
   if (options.mutationVerificationMode === 'offline') return;
   if (typeof options.resolveReuseOrigin !== 'function') {
     denyReuse(`${entry.packageName} reused origin cannot be resolved by trusted evidence`);
@@ -405,6 +418,7 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     `${entry.packageName} resolved reuse origin`,
     'MUTATION_REUSE_DENIED',
   );
+  const selected = typeof branch === 'function' ? branch(resolved, entry) : branch;
   const composition = resolved.composition;
   const receipt = resolved.semanticReceipt;
   exact(
@@ -423,7 +437,7 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     'MUTATION_REUSE_DENIED',
   );
   if (
-    composition.schemaVersion !== MUTATION_V21_SCHEMA ||
+    composition.schemaVersion !== selected.schemaVersion ||
     composition.kind !== 'mutation-composed-report-set-v2' ||
     composition.complete !== true ||
     composition.passed !== true ||
@@ -454,7 +468,7 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     composition.aggregate.verdict !== 'pass' ||
     composition.aggregate.passed !== true ||
     composition.aggregate.evidenceSetDigest !== origin.evidenceSetDigest ||
-    framedDigest(DOMAINS.composition, composition.packages) !== origin.evidenceSetDigest
+    framedDigest(selected.domains.composition, composition.packages) !== origin.evidenceSetDigest
   ) {
     denyReuse(`${entry.packageName} reused origin evidence set differs`);
   }
@@ -526,7 +540,7 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     'MUTATION_REUSE_DENIED',
   );
   if (
-    receipt.schemaVersion !== MUTATION_V21_SCHEMA ||
+    receipt.schemaVersion !== selected.schemaVersion ||
     receipt.kind !== 'mutation-semantic-verification-receipt-v2' ||
     receipt.semanticVerificationPerformed !== true ||
     receipt.verdict !== 'pass' ||
@@ -575,7 +589,7 @@ function validateTrustedReuseOrigin(origin, entry, options) {
       'MUTATION_REUSE_DENIED',
     );
     const { receiptDigest, ...withoutDigest } = receipt;
-    if (framedDigest(DOMAINS.semanticReceipt, withoutDigest) !== receiptDigest) {
+    if (framedDigest(selected.domains.semanticReceipt, withoutDigest) !== receiptDigest) {
       denyReuse(`${entry.packageName} reused origin receipt digest differs`);
     }
   } catch (error) {
@@ -606,7 +620,7 @@ function validateTrustedReuseOrigin(origin, entry, options) {
     originReceiptEntry.reportDigest !== entry.reportDigest ||
     originReceiptEntry.resultDigest !== entry.resultDigest ||
     originReceiptEntry.compositionEntryDigest !==
-      framedDigest(DOMAINS.compositionEntry, originEntry)
+      framedDigest(selected.domains.compositionEntry, originEntry)
   ) {
     denyReuse(`${entry.packageName} reused origin receipt package differs`);
   }
@@ -616,7 +630,9 @@ function validateTrustedReuseOrigin(origin, entry, options) {
       packageName: candidate.packageName,
       resultDigest: candidate.resultDigest,
     }));
-  if (receipt.packageResultSetDigest !== framedDigest(DOMAINS.packageResultSet, resultSet)) {
+  if (
+    receipt.packageResultSetDigest !== framedDigest(selected.domains.packageResultSet, resultSet)
+  ) {
     denyReuse(`${entry.packageName} reused origin result set differs`);
   }
 }
@@ -629,12 +645,26 @@ function artifactPaths(inputDigest, reportDigest, resultDigest) {
   };
 }
 
-function validateRequiredMaterial(contractEntry, material, disposition, origin, enforcePassing) {
+/**
+ * The shared v2 package-pair semantic kernel.
+ *
+ * It recomputes the normalized-report metrics, input identity, content-addressed
+ * store addresses, thresholds and the complete/pass verdict from the immutable
+ * pair bytes alone. Every forward contract branch reuses this exact kernel, so a
+ * v2.1-byte-identical report/result pair is never reinterpreted by a second
+ * implementation and never translated or rewritten.
+ *
+ * `reused` only selects the refusal code for legacy pair evidence; it does not
+ * relax any check.
+ */
+export function validateMutationPackagePair(contractEntry, material, options = {}) {
+  const enforcePassing = options.enforcePassing === true;
+  const reused = options.reused === true;
   const label = `mutation result ${contractEntry.packageName}`;
   const result = material.result;
   const report = material.report;
   if (result?.kind === 'mutation-package-result-v1' || result?.schemaVersion === '1.0.0') {
-    if (disposition === 'reused') fail('MUTATION_REUSE_DENIED', `${label} is legacy evidence`);
+    if (reused) fail('MUTATION_REUSE_DENIED', `${label} is legacy evidence`);
     fail('MUTATION_VERSION_UNSUPPORTED', `${label} is legacy evidence`);
   }
   exact(
@@ -703,8 +733,10 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
   string(result.reportDigest, `${label}.reportDigest`, SHA256, 'MUTATION_REPORT_INVALID');
 
   const metrics = reportMetrics(report, `mutation report ${contractEntry.packageName}`);
-  const reportDigest = sha256Hex(canonicalBytes(report));
-  const resultDigest = sha256Hex(canonicalBytes(result));
+  const reportBytes = canonicalBytes(report);
+  const resultBytes = canonicalBytes(result);
+  const reportDigest = sha256Hex(reportBytes);
+  const resultDigest = sha256Hex(resultBytes);
   if (result.reportDigest !== reportDigest) {
     fail('ARTIFACT_DIGEST_MISMATCH', `${label} report digest differs`);
   }
@@ -767,6 +799,24 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
     if (!passed) fail('MUTATION_THRESHOLD_FAILED', `${label} does not satisfy mutation thresholds`);
   }
 
+  return {
+    reportDigest,
+    resultDigest,
+    reportSizeBytes: reportBytes.length,
+    resultSizeBytes: resultBytes.length,
+    paths,
+    metrics,
+    complete,
+    passed,
+  };
+}
+
+function validateRequiredMaterial(contractEntry, material, disposition, origin, enforcePassing) {
+  const label = `mutation result ${contractEntry.packageName}`;
+  const checked = validateMutationPackagePair(contractEntry, material, {
+    enforcePassing,
+    reused: disposition === 'reused',
+  });
   if (disposition !== 'executed' && disposition !== 'reused') {
     fail('MUTATION_SUMMARY_MISMATCH', `${label} disposition is invalid`);
   }
@@ -774,7 +824,7 @@ function validateRequiredMaterial(contractEntry, material, disposition, origin, 
     fail('MUTATION_ORIGIN_MISMATCH', `${label} executed origin must be null`);
   }
   if (disposition === 'reused') validateReuseOrigin(origin, `${label}.origin`);
-  return { reportDigest, resultDigest, paths, metrics, complete, passed };
+  return checked;
 }
 
 function validateRequiredContract(entry, label) {
@@ -1359,4 +1409,37 @@ export {
   DOMAINS as MUTATION_V21_DIGEST_DOMAINS,
   INPUT_BINDINGS,
   STATUSES as MUTATION_V21_STATUSES,
+  REASONS as MUTATION_V21_REASONS,
+  checkedAdd as checkedStatusAdd,
+  emptyTotals as emptyStatusTotals,
+  validateCandidate as validateCandidateIdentity,
+  validateInputProjection as validateInputProjectionIdentity,
+  validatePortable as validatePortablePath,
+  validateProvenance as validateVerifierProvenance,
+  validateReuseOrigin as validateSemanticReuseOriginShape,
+  validateThresholds as validateMutationThresholds,
+  validateTrustedReuseOrigin as validateTrustedSemanticReuseOrigin,
 };
+
+/**
+ * Strict shape helpers shared with forward mutation contract branches. They are
+ * exported so a forward branch validates documents with the identical refusal
+ * semantics rather than a second, drifting implementation.
+ */
+export const MUTATION_V21_SHAPE = Object.freeze({
+  boolean,
+  exact,
+  fail,
+  finite,
+  object,
+  safeCount,
+  string,
+});
+
+/** Field grammars shared with forward mutation contract branches. */
+export const MUTATION_V21_PATTERNS = Object.freeze({
+  GIT_OBJECT,
+  PACKAGE_NAME,
+  RECEIPT_ID,
+  SHA256,
+});

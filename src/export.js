@@ -21,6 +21,8 @@ import {
 } from './canonical.js';
 import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
 import { mutationContractVersion } from './mutation.js';
+import { MUTATION_V21_SCHEMA } from './mutation-v21.js';
+import { MUTATION_V22_SCHEMA } from './mutation-v22.js';
 import { PAYLOAD_TYPE, verifyCandidateEvidence, verifyCandidateReceiptEvidence } from './verify.js';
 import {
   copyRootRelativeRegularFile,
@@ -246,10 +248,16 @@ export function preflightCandidateEvidence(options) {
   });
   for (const node of built.taskPolicy.requiredNodes) {
     const contract = node.outputContract;
+    // Legacy v1 and draft v2.0 mutation evidence stays readable for historical
+    // verification only. The forward v2.2 branch is accepted here exactly like
+    // v2.1, but its strict kernel still refuses unless the hosting API supplies
+    // the protected v2.2 expectations; this CLI supplies none.
     if (
       typeof contract?.kind === 'string' &&
       contract.kind.startsWith('mutation-') &&
-      (mutationContractVersion(contract.kind) !== 2 || contract.schemaVersion !== '2.1.0')
+      (mutationContractVersion(contract.kind) !== 2 ||
+        (contract.schemaVersion !== MUTATION_V21_SCHEMA &&
+          contract.schemaVersion !== MUTATION_V22_SCHEMA))
     ) {
       throw new VerificationError(
         'MUTATION_VERSION_UNSUPPORTED',
@@ -280,6 +288,7 @@ export function preflightCandidateEvidence(options) {
     expectedPolicyDigest: built.taskPolicyDigest,
     allowAdditionalArtifactFiles: true,
     resolveReuseOrigin: options.resolveReuseOrigin,
+    mutationExpectations: options.mutationExpectations,
   });
   return {
     repository,

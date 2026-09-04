@@ -165,6 +165,7 @@ export function verifyPreparedBundle({
   expectedTrustStoreDigest,
   expectedKeyId,
   bindingMode = 'exact-commit',
+  mutationExpectations,
 }) {
   // Do not canonicalize the supplied directory: realpath would silently follow
   // a bundle-root symlink before the identity-pinned readers can reject it.
@@ -175,12 +176,15 @@ export function verifyPreparedBundle({
   const taskPolicySnapshot = canonicalJson(bundle, 'task-policy.json', 'task policy');
   const taskPolicy = taskPolicySnapshot.value;
   validateTaskPolicy(taskPolicy);
-  const requiresV21Expectations = taskPolicy.requiredNodes?.some(
+  // Every content-addressed mutation-v2 branch requires the complete external
+  // identity population before an offline bundle may be verified or published.
+  const requiresPinnedExpectations = taskPolicy.requiredNodes?.some(
     (node) =>
       node.outputContract?.kind === 'mutation-report-set-v2' &&
-      node.outputContract?.schemaVersion === '2.1.0',
+      (node.outputContract?.schemaVersion === '2.1.0' ||
+        node.outputContract?.schemaVersion === '2.2.0'),
   );
-  if (requiresV21Expectations) {
+  if (requiresPinnedExpectations) {
     for (const [name, value] of Object.entries({
       expectedRepository,
       expectedCommit,
@@ -297,6 +301,7 @@ export function verifyPreparedBundle({
       expectedKeyId,
       expectedResultDigests: manifest.resultDigests,
       bindingMode,
+      mutationExpectations,
     });
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
