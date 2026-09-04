@@ -347,6 +347,36 @@ describe('path-free detached trust resolution', () => {
       resolveDetachedSigner(strictOptions(fixture, { trustStore: proxyStore })),
     );
     assert.equal(proxyReads.value, 0);
+    const revokedReads = { value: 0 };
+    const revokedProxy = new Proxy([], {
+      get() {
+        revokedReads.value += 1;
+        throw new Error('hostile revoked-array proxy trap');
+      },
+    });
+    expectCode('SCHEMA_INVALID', () =>
+      resolveDetachedSigner(
+        strictOptions(fixture, {
+          trustStore: { ...fixture.trustStore, revokedSignerIds: revokedProxy },
+        }),
+      ),
+    );
+    assert.equal(revokedReads.value, 0);
+    const signerReads = { value: 0 };
+    const signerProxy = new Proxy([], {
+      get() {
+        signerReads.value += 1;
+        throw new Error('hostile trusted-signers proxy trap');
+      },
+    });
+    expectCode('SCHEMA_INVALID', () =>
+      resolveDetachedSigner(
+        strictOptions(fixture, {
+          trustStore: { ...fixture.trustStore, trustedSigners: signerProxy },
+        }),
+      ),
+    );
+    assert.equal(signerReads.value, 0);
     const error = expectCode('SCHEMA_INVALID', () =>
       resolveDetachedSigner(strictOptions(fixture, { trustStore: malformed })),
     );
