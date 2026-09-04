@@ -5,11 +5,11 @@
   "$defs": {
     "identifier": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}(?![\\s\\S])"
     },
     "publicKeyPem": {
       "type": "string",
-      "pattern": "^-----BEGIN PUBLIC KEY-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END PUBLIC KEY-----(?:\\r?\\n)?$",
+      "pattern": "^-----BEGIN PUBLIC KEY-----\\r?\\n[A-Za-z0-9+/=\\r\\n]+-----END PUBLIC KEY-----(?:\\r?\\n)?(?![\\s\\S])",
       "description": "Public SPKI PEM only. The executable verifier additionally requires an Ed25519 key."
     },
     "revokedIdentifiers": {
