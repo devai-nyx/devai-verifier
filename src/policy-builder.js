@@ -39,29 +39,65 @@ function git(repo, args, { encoding = 'utf8', input } = {}) {
 function objectContentDigests(repo, objectIds) {
   const unique = [...new Set(objectIds)].sort();
   if (unique.length === 0) return new Map();
-  const output = Buffer.from(
-    git(repo, ['cat-file', '--batch'], { encoding: null, input: `${unique.join('\n')}\n` }),
-  );
   const digests = new Map();
-  let offset = 0;
+  const sizes = new Map();
+  const sizeOutput = Buffer.from(
+    git(repo, ['cat-file', '--batch-check'], {
+      encoding: null,
+      input: `${unique.join('\n')}\n`,
+    }),
+  );
+  let sizeOffset = 0;
   for (const expectedObjectId of unique) {
-    const newline = output.indexOf(0x0a, offset);
+    const newline = sizeOutput.indexOf(0x0a, sizeOffset);
     if (newline < 0) throw new VerificationError('GIT_ERROR', 'truncated cat-file header');
-    const header = output.subarray(offset, newline).toString('utf8');
-    const match = /^([0-9a-f]+) ([a-z]+) (\d+)$/u.exec(header);
-    if (match?.[1] === undefined || match[3] === undefined || match[1] !== expectedObjectId) {
+    const match = /^([0-9a-f]+) ([a-z]+) (\d+)$/u.exec(
+      sizeOutput.subarray(sizeOffset, newline).toString('utf8'),
+    );
+    const size = Number(match?.[3]);
+    if (match?.[1] !== expectedObjectId || !Number.isSafeInteger(size) || size < 0) {
       throw new VerificationError('GIT_ERROR', 'unexpected cat-file header');
     }
-    const size = Number(match[3]);
-    const contentStart = newline + 1;
-    const contentEnd = contentStart + size;
-    if (!Number.isSafeInteger(size) || size < 0 || output[contentEnd] !== 0x0a) {
-      throw new VerificationError('GIT_ERROR', 'truncated cat-file content');
-    }
-    digests.set(expectedObjectId, sha256Hex(output.subarray(contentStart, contentEnd)));
-    offset = contentEnd + 1;
+    sizes.set(expectedObjectId, size);
+    sizeOffset = newline + 1;
   }
-  if (offset !== output.length) throw new VerificationError('GIT_ERROR', 'extra cat-file output');
+  if (sizeOffset !== sizeOutput.length) throw new VerificationError('GIT_ERROR', 'extra cat-file output');
+
+  const maxBatchBytes = 32 * 1024 * 1024;
+  for (let start = 0; start < unique.length; ) {
+    const batch = [];
+    let estimatedBytes = 0;
+    while (start + batch.length < unique.length) {
+      const objectId = unique[start + batch.length];
+      const estimatedObjectBytes = objectId.length + 64 + sizes.get(objectId);
+      if (batch.length > 0 && estimatedBytes + estimatedObjectBytes > maxBatchBytes) break;
+      batch.push(objectId);
+      estimatedBytes += estimatedObjectBytes;
+    }
+    const output = Buffer.from(
+      git(repo, ['cat-file', '--batch'], { encoding: null, input: `${batch.join('\n')}\n` }),
+    );
+    let offset = 0;
+    for (const expectedObjectId of batch) {
+      const newline = output.indexOf(0x0a, offset);
+      if (newline < 0) throw new VerificationError('GIT_ERROR', 'truncated cat-file header');
+      const header = output.subarray(offset, newline).toString('utf8');
+      const match = /^([0-9a-f]+) ([a-z]+) (\d+)$/u.exec(header);
+      if (match?.[1] === undefined || match[3] === undefined || match[1] !== expectedObjectId) {
+        throw new VerificationError('GIT_ERROR', 'unexpected cat-file header');
+      }
+      const size = Number(match[3]);
+      const contentStart = newline + 1;
+      const contentEnd = contentStart + size;
+      if (!Number.isSafeInteger(size) || size < 0 || output[contentEnd] !== 0x0a) {
+        throw new VerificationError('GIT_ERROR', 'truncated cat-file content');
+      }
+      digests.set(expectedObjectId, sha256Hex(output.subarray(contentStart, contentEnd)));
+      offset = contentEnd + 1;
+    }
+    if (offset !== output.length) throw new VerificationError('GIT_ERROR', 'extra cat-file output');
+    start += batch.length;
+  }
   return digests;
 }
 
