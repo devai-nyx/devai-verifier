@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
@@ -225,6 +226,20 @@ describe('task-policy schema compatibility', () => {
 });
 
 describe('candidate snapshot and affected derivation', () => {
+  it('reconstructs deterministically when selected blobs exceed one batch buffer', () => {
+    const state = repository();
+    for (let index = 0; index < 65; index += 1) {
+      const payload = randomBytes(1024 * 1024);
+      payload[0] = index;
+      put(state.repo, `large/${String(index).padStart(3, '0')}.bin`, payload);
+    }
+    const candidate = commit(state.repo, 'add large selected population');
+    const first = build({ repo: state.repo, candidate, profileId: 'rc' });
+    const second = build({ repo: state.repo, candidate, profileId: 'rc' });
+    assert.deepEqual(second.taskPolicy, first.taskPolicy);
+    assert.equal(second.taskPolicyDigest, first.taskPolicyDigest);
+  });
+
   it('excludes only harness-mutated prefixes from reusable fixed-profile identity', () => {
     const state = repository();
     for (const [path, content] of [
