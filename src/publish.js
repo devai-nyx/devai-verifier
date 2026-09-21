@@ -281,6 +281,10 @@ export function verifyPreparedBundle({
   const snapshot = mkdtempSync(join(tmpdir(), 'devai-evidence-verify-'));
   let verified;
   try {
+    // Schema 1.1 binds an exact artifact population, including the valid empty
+    // population. The verifier still requires the population root to exist so
+    // it can prove that no undeclared files are present.
+    mkdirSync(join(snapshot, 'artifacts'), { recursive: false });
     writeSnapshotFile(snapshot, 'envelope.json', envelopeSnapshot.bytes);
     writeSnapshotFile(snapshot, 'task-policy.json', taskPolicySnapshot.bytes);
     for (const [path, bytes] of resultSnapshots) writeSnapshotFile(snapshot, path, bytes);

@@ -34,7 +34,7 @@ function put(path, value) {
   writeFileSync(path, typeof value === 'string' ? value : `${canonicalize(value)}\n`);
 }
 
-function fixture() {
+function fixture({ includeArtifacts = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'devai-publish-test-'));
   temporaryDirectories.push(root);
   const remote = join(root, 'remote.git');
@@ -61,11 +61,16 @@ function fixture() {
         nodeId: 'test:rc',
         taskKey,
         dependencies: [],
-        outputContract: {
-          kind: 'files',
-          paths: ['generated.json'],
-          requiredResult: 'pass',
-        },
+        outputContract: includeArtifacts
+          ? {
+              kind: 'files',
+              paths: ['generated.json'],
+              requiredResult: 'pass',
+            }
+          : {
+              kind: 'test',
+              requiredResult: 'pass',
+            },
       },
     ],
   };
@@ -80,7 +85,9 @@ function fixture() {
     outputDigests: {
       stdout: sha256Hex(Buffer.from('')),
       stderr: sha256Hex(Buffer.from('')),
-      'generated.json': sha256Hex(Buffer.from('{"proof":true}\n')),
+      ...(includeArtifacts && {
+        'generated.json': sha256Hex(Buffer.from('{"proof":true}\n')),
+      }),
     },
     startedAt: '2026-08-16T00:00:00.000Z',
     finishedAt: '2026-08-16T00:00:01.000Z',
@@ -120,7 +127,9 @@ function fixture() {
   put(join(bundle, 'envelope.json'), envelope);
   put(join(bundle, 'task-policy.json'), policy);
   put(join(bundle, 'results', `${resultDigest}.json`), result);
-  put(join(bundle, 'artifacts', 'generated.json'), '{"proof":true}\n');
+  if (includeArtifacts) {
+    put(join(bundle, 'artifacts', 'generated.json'), '{"proof":true}\n');
+  }
   put(join(bundle, 'manifest.json'), {
     schemaVersion: '1.1.0',
     repositoryId: 'fixture/repository',
@@ -131,13 +140,15 @@ function fixture() {
     taskPolicyDigest: policyDigest,
     envelopeDigest: sha256Hex(envelope),
     resultDigests: [resultDigest],
-    artifacts: [
-      {
-        path: 'generated.json',
-        mediaType: 'application/json',
-        sha256: sha256Hex(Buffer.from('{"proof":true}\n')),
-      },
-    ],
+    artifacts: includeArtifacts
+      ? [
+          {
+            path: 'generated.json',
+            mediaType: 'application/json',
+            sha256: sha256Hex(Buffer.from('{"proof":true}\n')),
+          },
+        ]
+      : [],
   });
   const trustStorePath = join(root, 'trust.json');
   put(trustStorePath, trust);
@@ -428,6 +439,35 @@ function expectCode(code, action) {
 }
 
 describe('protected evidence publication', () => {
+  it('verifies and publishes an RC schema 1.1 bundle with zero declared artifacts', () => {
+    const state = fixture({ includeArtifacts: false });
+    const prepared = verifyPreparedBundle({
+      bundleDir: state.bundle,
+      trustStorePath: state.trustStorePath,
+    });
+    assert.equal(prepared.verified.ok, true);
+    assert.deepEqual(prepared.manifest.artifacts, []);
+
+    // Publication performs a second verification from the captured staged
+    // population. Passing here proves both snapshots materialize the required
+    // empty artifact root without weakening exact-population checks.
+    const published = publishCandidateEvidence(options(state, []));
+    assert.equal(published.published, true);
+    assert.doesNotMatch(
+      git(state.remote, ['ls-tree', '-r', '--name-only', published.tag]),
+      /(?:^|\n)artifacts\//u,
+    );
+
+    const malformed = fixture({ includeArtifacts: false });
+    put(join(malformed.bundle, 'artifacts', 'unexpected.json'), '{}\n');
+    expectCode('BUNDLE_POPULATION_MISMATCH', () =>
+      verifyPreparedBundle({
+        bundleDir: malformed.bundle,
+        trustStorePath: malformed.trustStorePath,
+      }),
+    );
+  });
+
   it('keeps v1 and draft v2 mutation evidence read-only at the publication boundary', () => {
     for (const outputContract of [
       { kind: 'mutation-report-set-v1' },
