@@ -502,7 +502,8 @@ const PROFILE_ID_SEPARATOR = /[/\\]/u;
 
 /**
  * A profile id is a descriptor identifier, never a path (ADR-REL-0031). The grammar
- * alone decides: an id with a path separator is refused before any descriptor is read,
+ * alone decides, never file existence: an id with a path separator or a dot (a file
+ * name such as toolchain.json) is refused before any descriptor is read,
  * so a usage mistake is never reported as PROFILE_UNKNOWN, which stays reserved for a
  * well-formed id the descriptor does not declare.
  */
@@ -511,6 +512,7 @@ export function assertProfileId(profileId) {
     typeof profileId !== 'string' ||
     profileId === '' ||
     profileId.includes('\0') ||
+    profileId.includes('.') ||
     PROFILE_ID_SEPARATOR.test(profileId)
   ) {
     throw new VerificationError(

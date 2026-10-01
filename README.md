@@ -262,7 +262,7 @@ relabeling reused evidence as fresh.
 Affected-mode export additionally requires `--base <exact-ancestor-commit>`.
 
 A `--profile` value is a descriptor profile id, never a path: a value containing
-`/` or `\` is refused with `PROFILE_ID_INVALID` before the descriptor is read, and
+`/`, `\`, or `.` is refused with `PROFILE_ID_INVALID` before the descriptor is read, and
 `PROFILE_UNKNOWN` is reserved for a well-formed id the descriptor does not declare.
 
 The certify receipt of a release-intent run exports through the release-intent
