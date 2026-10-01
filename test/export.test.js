@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -741,5 +742,596 @@ describe('trusted candidate evidence export', () => {
     const other = generateKeyPairSync('ed25519');
     put(mismatchState.publicKeyPath, other.publicKey.export({ type: 'spki', format: 'pem' }));
     expectCode('KEY_MISMATCH', () => exportCandidateEvidence(exportOptions(mismatchState)));
+  });
+});
+
+// ADR-REL-0031: the release-intent export path.
+//
+// A release run selects its nodes by capability from a pinned release intent and a
+// release verification profile, and writes a certify receipt whose task policy is the
+// release form (schema 1.2.0 with an inputProjection). The exporter must reconstruct
+// that policy from the pins the release preflight receipt carries, never from the task
+// set the receipt claims, and refuse every drift with its own code.
+
+const INTENT_SENTINEL = 'export-ran-a-task';
+const PREFLIGHT_CAPABILITIES = [
+  'formatting-hygiene',
+  'lint',
+  'type-integrity',
+  'schema-consistency',
+  'secret-scan',
+  'path-portability',
+  'package-integrity',
+  'exact-candidate',
+];
+// A stable patch (1.0.0 -> 1.0.1, support current) selects the preflight floor plus these.
+const CERTIFY_ONLY_CAPABILITIES = ['affected-checks', 'dependent-checks', 'build-integrity'];
+const RELEASE_INPUT_PROJECTION = {
+  schemaVersion: '1.0.0',
+  source: 'exact-candidate-tree',
+  excludedPrefixes: ['.devai/state/', 'record/', 'scratch/'],
+};
+const INTENT_TOOLCHAIN = { node: 'v24.5.0' };
+
+function intentTask(nodeId, dependencies, inputSelectors) {
+  return {
+    nodeId,
+    dependencies,
+    // Executing this task would leave a sentinel beside the candidate. The exporter
+    // must never execute a task, so the sentinel's absence proves no second run.
+    argv: ['node', '-e', `require('node:fs').writeFileSync('../${INTENT_SENTINEL}', '${nodeId}')`],
+    cwd: '.',
+    runner: 'node-test-v1',
+    inputSelectors,
+    toolchainKeys: ['node'],
+    allowlistedEnv: [],
+    outputContract: { kind: 'node-test', requiredResult: 'pass' },
+  };
+}
+
+function intentDescriptor() {
+  return {
+    schemaVersion: '1.0.0',
+    descriptorVersion: 'intent-fixture-1',
+    repositoryId: 'fixture/repository',
+    fallbackNodeId: null,
+    dynamicFallbackSelectors: [],
+    tasks: [
+      intentTask(
+        'prepare',
+        [],
+        [
+          { kind: 'exact', pattern: 'package.json' },
+          { kind: 'exact', pattern: 'test-tasks.json' },
+        ],
+      ),
+      intentTask('unit', ['prepare'], [{ kind: 'prefix', pattern: 'src/' }]),
+      intentTask('docs', [], [{ kind: 'prefix', pattern: 'docs/' }]),
+    ],
+    profiles: [
+      {
+        profileId: 'affected',
+        mode: 'affected',
+        requiredNodes: ['prepare'],
+        eligibleNodes: ['prepare', 'unit', 'docs'],
+      },
+      // Fixed profiles whose node sets equal the certify and preflight selections. They
+      // are the independent oracle below and are never named on the intent path.
+      { profileId: 'rc', mode: 'fixed', requiredNodes: ['prepare', 'unit'] },
+      { profileId: 'preflight-floor', mode: 'fixed', requiredNodes: ['prepare'] },
+    ],
+  };
+}
+
+function intentReleaseProfile() {
+  return {
+    schemaVersion: '1.0.0',
+    policy_id: 'fixture.release',
+    policy_version: '1.0.0',
+    release_unit: 'fixture/repository',
+    version_source: 'package.json',
+    default_support: 'current',
+    capability_tasks: {
+      ...Object.fromEntries(PREFLIGHT_CAPABILITIES.map((capability) => [capability, ['prepare']])),
+      ...Object.fromEntries(CERTIFY_ONLY_CAPABILITIES.map((capability) => [capability, ['unit']])),
+    },
+    risk_capabilities: {},
+    mutation_roster: [],
+  };
+}
+
+function gitIdentity(repo, revision) {
+  return {
+    commit: git(repo, ['rev-parse', revision]),
+    tree: git(repo, ['rev-parse', `${revision}^{tree}`]),
+  };
+}
+
+function commitAll(repo, message) {
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', message]);
+  return gitIdentity(repo, 'HEAD');
+}
+
+/** SHA-256 of the exact candidate tree outside the harness-mutated prefixes. */
+function inputProjectionDigest(repo, commit) {
+  const output = execFileSync('git', ['-C', repo, 'ls-tree', '-r', '-z', '--full-tree', commit]);
+  const entries = [];
+  for (const record of output.toString('utf8').split('\0')) {
+    if (record === '') continue;
+    const [, mode, type, objectId, path] = /^(\d+) ([a-z]+) ([0-9a-f]+)\t(.+)$/u.exec(record);
+    if (RELEASE_INPUT_PROJECTION.excludedPrefixes.some((prefix) => path.startsWith(prefix))) {
+      continue;
+    }
+    const content = execFileSync('git', ['-C', repo, 'cat-file', 'blob', objectId]);
+    entries.push({ path, mode, type, contentDigest: sha256Hex(content) });
+  }
+  entries.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return sha256Hex(entries);
+}
+
+/**
+ * The release task policy the run would have pinned, computed without the intent path:
+ * with no mutation binding, protected executable identity, or preflight probe node
+ * selected, a release task key is the fixed-profile task key, so the release form is the
+ * schema 1.1 policy of the same node set, re-versioned to 1.2.0 with the input projection.
+ */
+function releaseOracle(state, profileId) {
+  const built = buildExpectedTaskPolicy({
+    repo: state.repo,
+    descriptor: intentDescriptor(),
+    profileId,
+    candidateCommit: state.candidate.commit,
+    expectedTree: state.candidate.tree,
+    toolchain: INTENT_TOOLCHAIN,
+    environment: {},
+    policySchemaVersion: '1.1.0',
+  });
+  const taskPolicy = {
+    ...built.taskPolicy,
+    schemaVersion: '1.2.0',
+    inputProjection: {
+      ...RELEASE_INPUT_PROJECTION,
+      digest: inputProjectionDigest(state.repo, state.candidate.commit),
+    },
+  };
+  return { taskPolicy, taskPolicyDigest: sha256Hex(taskPolicy) };
+}
+
+function intentResult(state, node, dependencyDigests) {
+  const result = {
+    schemaVersion: '1.0.0',
+    nodeId: node.nodeId,
+    taskKey: node.taskKey,
+    status: 'PASS',
+    inputDigest: '1'.repeat(64),
+    dependencyResultDigests: Object.fromEntries(
+      node.dependencies.map((dependency) => [dependency, dependencyDigests[dependency]]),
+    ),
+    outputDigests: { stdout: '2'.repeat(64), stderr: '3'.repeat(64) },
+    startedAt: '2026-10-01T00:00:00.000Z',
+    finishedAt: '2026-10-01T00:00:01.000Z',
+  };
+  const digest = sha256Hex(result);
+  put(join(state.resultsDir, `${digest}.json`), canonicalize(result));
+  return digest;
+}
+
+function writeIntentInputs(state, { repin = false } = {}) {
+  if (repin) {
+    state.preflight.releaseIntentDigest = sha256Hex(state.intent);
+    state.preflight.releaseProfileDigest = sha256Hex(state.releaseProfile);
+  }
+  // The intent and the profile are written pretty-printed, not canonically: their pins are
+  // digests of canonical JSON, so formatting never changes an export's result.
+  put(state.paths.intent, `${JSON.stringify(state.intent, null, 2)}\n`);
+  put(state.paths.releaseProfile, `${JSON.stringify(state.releaseProfile, null, 2)}\n`);
+  put(state.paths.preflightReceipt, canonicalize(state.preflight));
+  put(state.paths.receipt, canonicalize(state.receipt));
+}
+
+function intentFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'devai-export-intent-'));
+  temporaryDirectories.push(root);
+  const repo = join(root, 'candidate');
+  mkdirSync(repo);
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.name', 'Verifier Test']);
+  git(repo, ['config', 'user.email', 'verifier@example.invalid']);
+  put(join(repo, '.gitignore'), '.devai/state/\n');
+  put(join(repo, 'docs/notes.md'), '# Notes\n');
+  const genesis = commitAll(repo, 'genesis');
+  put(join(repo, 'package.json'), '{"name":"fixture","version":"1.0.0"}\n');
+  put(join(repo, 'src/a.js'), 'export const value = 1;\n');
+  put(join(repo, 'test-tasks.json'), `${JSON.stringify(intentDescriptor(), null, 2)}\n`);
+  const base = commitAll(repo, 'base');
+  put(join(repo, 'package.json'), '{"name":"fixture","version":"1.0.1"}\n');
+  put(join(repo, 'src/a.js'), 'export const value = 2;\n');
+  const candidate = commitAll(repo, 'candidate');
+
+  const state = {
+    root,
+    repo,
+    genesis,
+    base,
+    candidate,
+    resultsDir: join(root, 'runner-results'),
+    outputDir: join(root, 'exported'),
+    paths: {
+      intent: join(root, 'release-intent.json'),
+      releaseProfile: join(root, 'release-profile.json'),
+      preflightReceipt: join(root, 'release-preflight-receipt.json'),
+      receipt: join(root, 'candidate-receipt.json'),
+      toolchain: join(root, 'toolchain.json'),
+      environment: join(root, 'environment.json'),
+      privateKey: join(root, 'private.pem'),
+      publicKey: join(root, 'public.pem'),
+      trustStore: join(root, 'trust-store.json'),
+    },
+  };
+  mkdirSync(state.resultsDir);
+  put(state.paths.toolchain, `${JSON.stringify(INTENT_TOOLCHAIN)}\n`);
+  put(state.paths.environment, '{}\n');
+  const keys = generateKeyPairSync('ed25519');
+  put(state.paths.privateKey, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }));
+  put(state.paths.publicKey, keys.publicKey.export({ type: 'spki', format: 'pem' }));
+  put(
+    state.paths.trustStore,
+    canonicalize({
+      schemaVersion: '1.0.0',
+      trustedSigners: [
+        {
+          signerId: 'local-rc-signer',
+          publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+        },
+      ],
+      revokedSignerIds: [],
+    }),
+  );
+
+  state.oracle = {
+    certify: releaseOracle(state, 'rc'),
+    preflight: releaseOracle(state, 'preflight-floor'),
+  };
+  const digests = {};
+  const nodes = state.oracle.certify.taskPolicy.requiredNodes;
+  for (const node of nodes) digests[node.nodeId] = intentResult(state, node, digests);
+  state.resultDigests = digests;
+
+  state.intent = {
+    schemaVersion: '1.0.0',
+    release_unit: 'fixture/repository',
+    current_version: '1.0.0',
+    target_version: '1.0.1',
+    support: 'current',
+    changed_paths: ['package.json', 'src/a.js'],
+    changed_packages: [],
+    candidate: { ...candidate },
+    base: { ...base },
+  };
+  state.releaseProfile = intentReleaseProfile();
+  state.preflight = {
+    schemaVersion: '1.0.0',
+    repository: { id: 'fixture/repository', ...candidate },
+    base: { ...base },
+    releaseIntentDigest: sha256Hex(state.intent),
+    releaseProfileDigest: sha256Hex(state.releaseProfile),
+    taskPolicyDigest: state.oracle.preflight.taskPolicyDigest,
+    toolchainDigest: sha256Hex(INTENT_TOOLCHAIN),
+    checks: PREFLIGHT_CAPABILITIES.map((capability) => ({
+      capability,
+      status: 'executed',
+      reasonCode: 'capability-selected',
+      resultDigest: digests.prepare,
+    })),
+    verdict: 'pass',
+    blockingReasons: [],
+    createdAt: '2026-10-01T00:00:02.000Z',
+  };
+  state.receipt = {
+    schemaVersion: '1.1.0',
+    repository: { id: 'fixture/repository', ...candidate },
+    profile: 'rc',
+    taskPolicyDigest: state.oracle.certify.taskPolicyDigest,
+    createdAt: '2026-10-01T00:00:03.000Z',
+    tasks: nodes.map((node) => ({
+      nodeId: node.nodeId,
+      taskKey: node.taskKey,
+      resultDigest: digests[node.nodeId],
+    })),
+  };
+  writeIntentInputs(state);
+  return state;
+}
+
+function intentCliArguments(state, overrides = {}) {
+  const values = {
+    repo: state.repo,
+    receipt: state.paths.receipt,
+    'results-dir': state.resultsDir,
+    'release-intent': state.paths.intent,
+    'release-profile': state.paths.releaseProfile,
+    'release-stage': 'certify',
+    'preflight-receipt': state.paths.preflightReceipt,
+    base: state.base.commit,
+    commit: state.candidate.commit,
+    tree: state.candidate.tree,
+    toolchain: state.paths.toolchain,
+    environment: state.paths.environment,
+    'private-key': state.paths.privateKey,
+    'public-key': state.paths.publicKey,
+    'signer-id': 'local-rc-signer',
+    'output-dir': state.outputDir,
+    ...overrides,
+  };
+  return Object.entries(values)
+    .filter(([, value]) => value !== undefined)
+    .flatMap(([name, value]) => [`--${name}`, value]);
+}
+
+function runIntentExport(state, overrides = {}) {
+  return spawnSync(process.execPath, [EXPORT_CLI, ...intentCliArguments(state, overrides)], {
+    cwd: state.root,
+    encoding: 'utf8',
+  });
+}
+
+function assertNothingExported(state) {
+  assert.equal(existsSync(state.outputDir), false);
+  assert.deepEqual(
+    readdirSync(state.root).filter((name) => name.startsWith('.devai-evidence-export-')),
+    [],
+  );
+  assert.equal(existsSync(join(state.root, INTENT_SENTINEL)), false);
+}
+
+function assertIntentRefusal(state, code, overrides = {}) {
+  const run = runIntentExport(state, overrides);
+  assert.equal(run.stdout, '', `${code}: no result line on refusal`);
+  assert.notEqual(run.stderr, '', `${code}: a coded refusal line is required`);
+  const refusal = JSON.parse(run.stderr);
+  assert.equal(refusal.ok, false);
+  assert.equal(refusal.code, code, `expected ${code}, got ${run.stderr}`);
+  assert.equal(run.status, code === 'USAGE' ? 64 : 2);
+  assertNothingExported(state);
+  return refusal;
+}
+
+describe('release-intent certify export (ADR-REL-0031)', () => {
+  it('exports the certify receipt of a release-intent run without executing any task (IA-001)', () => {
+    const state = intentFixture();
+    const resultsBefore = readdirSync(state.resultsDir).sort();
+    const run = runIntentExport(state);
+    assert.equal(run.status, 0, run.stderr);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.ok, true);
+    // The digest the run pinned in its certify receipt is the digest the exporter
+    // reconstructs, and both equal the independent oracle.
+    assert.equal(result.taskPolicyDigest, state.receipt.taskPolicyDigest);
+    assert.equal(result.taskPolicyDigest, state.oracle.certify.taskPolicyDigest);
+    assert.notEqual(result.taskPolicyDigest, state.oracle.preflight.taskPolicyDigest);
+    assert.deepEqual(result.verifiedNodes, ['prepare', 'unit']);
+    const exportedPolicy = JSON.parse(
+      readFileSync(join(state.outputDir, 'task-policy.json'), 'utf8'),
+    );
+    assert.deepEqual(exportedPolicy, state.oracle.certify.taskPolicy);
+    assert.equal(exportedPolicy.schemaVersion, '1.2.0');
+    const verified = loadAndVerify({
+      envelopePath: join(state.outputDir, 'envelope.json'),
+      resultsDir: join(state.outputDir, 'results'),
+      taskPolicyPath: join(state.outputDir, 'task-policy.json'),
+      trustStorePath: state.paths.trustStore,
+      expectedRepository: 'fixture/repository',
+      expectedCommit: state.candidate.commit,
+      expectedTree: state.candidate.tree,
+      expectedPolicyDigest: state.oracle.certify.taskPolicyDigest,
+    });
+    assert.equal(verified.ok, true);
+    assert.deepEqual(readdirSync(join(state.outputDir, 'results')).sort(), resultsBefore);
+    // No task ran during export: no sentinel, no new result, a clean candidate.
+    assert.equal(existsSync(join(state.root, INTENT_SENTINEL)), false);
+    assert.deepEqual(readdirSync(state.resultsDir).sort(), resultsBefore);
+    assert.equal(git(state.repo, ['status', '--porcelain=v1', '--untracked-files=all']), '');
+
+    // The reconstruction is deterministic: a second export of the same pins is identical.
+    const again = runIntentExport(state, { 'output-dir': join(state.root, 'exported-again') });
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(JSON.parse(again.stdout).taskPolicyDigest, result.taskPolicyDigest);
+    assert.equal(
+      readFileSync(join(state.root, 'exported-again', 'task-policy.json'), 'utf8'),
+      readFileSync(join(state.outputDir, 'task-policy.json'), 'utf8'),
+    );
+  });
+
+  it('refuses an intent altered after the run instead of trusting the receipt (IA-002)', () => {
+    for (const alter of [
+      (intent) => {
+        intent.changed_packages = ['@fixture/extra'];
+      },
+      (intent) => {
+        intent.support = 'lts';
+      },
+      (intent) => {
+        intent.target_version = '1.0.2';
+      },
+    ]) {
+      const state = intentFixture();
+      alter(state.intent);
+      writeIntentInputs(state);
+      assertIntentRefusal(state, 'INTENT_DIGEST_MISMATCH');
+    }
+  });
+
+  it('refuses an intent whose reconstructed release decision is not ready (IA-002)', () => {
+    const state = intentFixture();
+    // A stable target on the beta channel blocks the decision; the preflight pin is moved
+    // with it so that nothing but the decision itself is wrong.
+    state.intent.channel = 'beta';
+    writeIntentInputs(state, { repin: true });
+    const refusal = assertIntentRefusal(state, 'INTENT_DECISION_BLOCKED');
+    assert.match(refusal.message, /channel-mismatch/u);
+  });
+
+  it('refuses a stage other than certify and a preflight-stage receipt (IA-003)', () => {
+    const wrongStage = intentFixture();
+    assertIntentRefusal(wrongStage, 'INTENT_STAGE_MISMATCH', { 'release-stage': 'preflight' });
+
+    const preflightAsReceipt = intentFixture();
+    assertIntentRefusal(preflightAsReceipt, 'INTENT_STAGE_MISMATCH', {
+      receipt: preflightAsReceipt.paths.preflightReceipt,
+    });
+
+    // A candidate receipt built for the preflight stage: its digest is the preflight-stage
+    // reconstruction and its tasks are exactly the preflight population.
+    const preflightPolicy = intentFixture();
+    const prepare = preflightPolicy.oracle.preflight.taskPolicy.requiredNodes[0];
+    preflightPolicy.receipt.taskPolicyDigest = preflightPolicy.oracle.preflight.taskPolicyDigest;
+    preflightPolicy.receipt.tasks = [
+      {
+        nodeId: prepare.nodeId,
+        taskKey: prepare.taskKey,
+        resultDigest: preflightPolicy.resultDigests.prepare,
+      },
+    ];
+    writeIntentInputs(preflightPolicy);
+    assertIntentRefusal(preflightPolicy, 'INTENT_STAGE_MISMATCH');
+  });
+
+  it('refuses a stale release policy and a receipt built against another policy (IA-003)', () => {
+    const edited = intentFixture();
+    edited.releaseProfile.policy_version = '1.0.1';
+    writeIntentInputs(edited);
+    assertIntentRefusal(edited, 'INTENT_POLICY_STALE');
+
+    const otherUnit = intentFixture();
+    otherUnit.releaseProfile.release_unit = 'fixture/other';
+    writeIntentInputs(otherUnit, { repin: true });
+    assertIntentRefusal(otherUnit, 'INTENT_POLICY_STALE');
+
+    const staleReceipt = intentFixture();
+    staleReceipt.receipt.taskPolicyDigest = 'f'.repeat(64);
+    writeIntentInputs(staleReceipt);
+    assertIntentRefusal(staleReceipt, 'POLICY_DIGEST_MISMATCH');
+  });
+
+  it('refuses a base that is not the intent base (IA-004)', () => {
+    const otherBase = intentFixture();
+    assertIntentRefusal(otherBase, 'INTENT_BASE_MISMATCH', { base: otherBase.genesis.commit });
+
+    const preflightBase = intentFixture();
+    preflightBase.preflight.base = { ...preflightBase.genesis };
+    writeIntentInputs(preflightBase);
+    assertIntentRefusal(preflightBase, 'INTENT_BASE_MISMATCH');
+
+    const unresolvedTree = intentFixture();
+    unresolvedTree.intent.base = {
+      commit: unresolvedTree.base.commit,
+      tree: unresolvedTree.genesis.tree,
+    };
+    unresolvedTree.preflight.base = { ...unresolvedTree.intent.base };
+    writeIntentInputs(unresolvedTree, { repin: true });
+    assertIntentRefusal(unresolvedTree, 'INTENT_BASE_MISMATCH');
+  });
+
+  it('refuses a candidate that is not the intent candidate (IA-004)', () => {
+    const preflightCandidate = intentFixture();
+    preflightCandidate.preflight.repository = {
+      id: 'fixture/repository',
+      ...preflightCandidate.base,
+    };
+    writeIntentInputs(preflightCandidate);
+    assertIntentRefusal(preflightCandidate, 'INTENT_CANDIDATE_MISMATCH');
+
+    const intentCandidate = intentFixture();
+    intentCandidate.intent.candidate = { ...intentCandidate.base };
+    writeIntentInputs(intentCandidate, { repin: true });
+    assertIntentRefusal(intentCandidate, 'INTENT_CANDIDATE_MISMATCH');
+
+    const otherRepository = intentFixture();
+    otherRepository.preflight.repository.id = 'fixture/other';
+    writeIntentInputs(otherRepository);
+    assertIntentRefusal(otherRepository, 'INTENT_CANDIDATE_MISMATCH');
+  });
+
+  it('refuses a node population that is not exactly the reconstruction (IA-004)', () => {
+    const subset = intentFixture();
+    subset.receipt.tasks = subset.receipt.tasks.filter((task) => task.nodeId !== 'unit');
+    writeIntentInputs(subset);
+    assertIntentRefusal(subset, 'INTENT_POPULATION_INCOMPLETE');
+
+    const superset = intentFixture();
+    const docs = { nodeId: 'docs', taskKey: 'd'.repeat(64), dependencies: [] };
+    superset.receipt.tasks.push({
+      nodeId: 'docs',
+      taskKey: docs.taskKey,
+      resultDigest: intentResult(superset, docs, {}),
+    });
+    writeIntentInputs(superset);
+    assertIntentRefusal(superset, 'INTENT_POPULATION_INCOMPLETE');
+
+    const staleKey = intentFixture();
+    staleKey.receipt.tasks = staleKey.receipt.tasks.map((task) =>
+      task.nodeId === 'unit' ? { ...task, taskKey: 'e'.repeat(64) } : task,
+    );
+    writeIntentInputs(staleKey);
+    assertIntentRefusal(staleKey, 'INTENT_POPULATION_INCOMPLETE');
+  });
+
+  it('refuses a mixed or incomplete path selection as usage before reading inputs', () => {
+    const state = intentFixture();
+    assertIntentRefusal(state, 'USAGE', { profile: 'rc' });
+    for (const omitted of [
+      'release-intent',
+      'release-profile',
+      'release-stage',
+      'preflight-receipt',
+    ]) {
+      assertIntentRefusal(state, 'USAGE', { [omitted]: undefined });
+    }
+    // Usage is decided before any input is read: an unreadable intent is still USAGE.
+    assertIntentRefusal(state, 'USAGE', {
+      profile: 'rc',
+      'release-intent': join(state.root, 'missing-intent.json'),
+    });
+  });
+
+  it('distinguishes a path passed as a profile id from an unknown id (IA-005)', () => {
+    const state = fixture();
+    const withProfile = (profile) =>
+      exportCliArguments(state).map((value, index, all) =>
+        all[index - 1] === '--profile' ? profile : value,
+      );
+    const refuse = (profile, code, cwd = state.root) => {
+      const run = spawnSync(
+        process.execPath,
+        [EXPORT_CLI, ...withProfile(profile), '--private-key', state.privateKeyPath],
+        { cwd, encoding: 'utf8' },
+      );
+      assert.equal(run.status, 2, run.stderr);
+      assert.equal(run.stdout, '');
+      assert.equal(JSON.parse(run.stderr).code, code, `${profile}: ${run.stderr}`);
+      assert.equal(existsSync(state.outputDir), false);
+    };
+    refuse(state.receiptPath, 'PROFILE_ID_INVALID');
+    refuse('profiles/rc', 'PROFILE_ID_INVALID');
+    refuse('profiles\\rc', 'PROFILE_ID_INVALID');
+    // A bare name that names a readable file in the working directory is a path too.
+    refuse('receipt.json', 'PROFILE_ID_INVALID', state.root);
+    refuse('not-declared', 'PROFILE_UNKNOWN');
+
+    // The profile path is unchanged: the same profile-driven receipt still exports.
+    const exported = spawnSync(
+      process.execPath,
+      [EXPORT_CLI, ...withProfile('rc'), '--private-key', state.privateKeyPath],
+      { cwd: state.root, encoding: 'utf8' },
+    );
+    assert.equal(exported.status, 0, exported.stderr);
+    const result = JSON.parse(exported.stdout);
+    assert.equal(result.profile, 'rc');
+    assert.equal(result.taskPolicyDigest, state.built.taskPolicyDigest);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(state.outputDir, 'task-policy.json'), 'utf8')),
+      state.built.taskPolicy,
+    );
   });
 });
