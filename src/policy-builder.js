@@ -498,68 +498,52 @@ function selectedNodeIds(descriptor, profile, changes) {
   return selected;
 }
 
-export function buildExpectedTaskPolicy({
-  repo,
-  descriptor,
-  profileId,
-  candidateCommit,
-  expectedTree,
-  baseCommit,
-  toolchain,
-  environment,
-  policySchemaVersion = '1.0.0',
-}) {
-  if (policySchemaVersion !== '1.0.0' && policySchemaVersion !== '1.1.0') {
-    throw new VerificationError('SCHEMA_INVALID', 'unsupported task-policy schemaVersion');
-  }
-  validateDescriptor(descriptor);
-  validateStringMap(toolchain, 'toolchain');
-  validateEnvironmentMap(environment, 'environment');
-  const ordered = topologicalTasks(descriptor);
-  resolveCommit(repo, candidateCommit, 'candidate commit');
-  const candidateTree = git(repo, ['show', '-s', '--format=%T', candidateCommit]).trim();
-  assertString(expectedTree, 'expected tree', GIT_OBJECT);
-  if (candidateTree !== expectedTree) {
+const PROFILE_ID_SEPARATOR = /[/\\]/u;
+
+/**
+ * A profile id is a descriptor identifier, never a path (ADR-REL-0031). The grammar
+ * alone decides: an id with a path separator is refused before any descriptor is read,
+ * so a usage mistake is never reported as PROFILE_UNKNOWN, which stays reserved for a
+ * well-formed id the descriptor does not declare.
+ */
+export function assertProfileId(profileId) {
+  if (
+    typeof profileId !== 'string' ||
+    profileId === '' ||
+    profileId.includes('\0') ||
+    PROFILE_ID_SEPARATOR.test(profileId)
+  ) {
     throw new VerificationError(
-      'TREE_MISMATCH',
-      'candidate commit tree does not match expected tree',
+      'PROFILE_ID_INVALID',
+      'profile must be a descriptor profile id, not a path',
     );
   }
-  const profile = descriptor.profiles.find((entry) => entry.profileId === profileId);
-  if (profile === undefined) {
-    throw new VerificationError('PROFILE_UNKNOWN', `unknown profile ${profileId}`);
-  }
-  let changes = [];
-  if (profile.mode === 'affected') {
-    if (baseCommit === undefined) {
-      throw new VerificationError(
-        'BASE_REQUIRED',
-        'affected profile requires an exact base commit',
-      );
-    }
-    resolveCommit(repo, baseCommit, 'base commit');
-    const ancestor = spawnSync('git', [
-      '-C',
-      repo,
-      'merge-base',
-      '--is-ancestor',
-      baseCommit,
-      candidateCommit,
-    ]);
-    if (ancestor.status !== 0) {
-      throw new VerificationError(
-        'BASE_NOT_ANCESTOR',
-        'base commit is not an ancestor of candidate',
-      );
-    }
-    changes = changedPaths(repo, baseCommit, candidateCommit).filter(
-      (path) => !isHarnessMutatedPath(path),
-    );
-  }
-  const selected = selectedNodeIds(descriptor, profile, changes);
+}
+
+function candidateSnapshot(repo, candidateCommit) {
   const entries = snapshot(repo, candidateCommit).filter(
     (entry) => !isHarnessMutatedPath(entry.path),
   );
+  return { entries };
+}
+
+/**
+ * Task keys and required nodes for an already-selected node set. Schema 1.0.0 omits
+ * output contracts; schema 1.1.0 and the release form 1.2.0 carry them and require
+ * every selected environment value to be a SHA-256 identity or null.
+ */
+function requiredNodesFor({
+  repo,
+  descriptor,
+  ordered,
+  selected,
+  candidateCommit,
+  entries,
+  toolchain,
+  environment,
+  policySchemaVersion,
+}) {
+  const portable = policySchemaVersion !== '1.0.0';
   const descriptorDigest = sha256Hex(descriptor);
   const blobDigests = objectContentDigests(
     repo,
@@ -592,11 +576,7 @@ export function buildExpectedTaskPolicy({
           `task ${task.nodeId} requires environment ${key}`,
         );
       }
-      if (
-        policySchemaVersion === '1.1.0' &&
-        environment[key] !== null &&
-        !ENVIRONMENT_IDENTITY.test(environment[key])
-      ) {
+      if (portable && environment[key] !== null && !ENVIRONMENT_IDENTITY.test(environment[key])) {
         throw new VerificationError(
           'ENVIRONMENT_IDENTITY_INVALID',
           `task ${task.nodeId} environment ${key} must be a SHA-256 identity`,
@@ -648,9 +628,84 @@ export function buildExpectedTaskPolicy({
         taskKey: taskKeys.get(task.nodeId),
         dependencies: [...task.dependencies],
       };
-      if (policySchemaVersion === '1.1.0') node.outputContract = outputContracts.get(task.nodeId);
+      if (portable) node.outputContract = outputContracts.get(task.nodeId);
       return node;
     });
+  return { descriptorDigest, requiredNodes, blobDigests };
+}
+
+export function buildExpectedTaskPolicy({
+  repo,
+  descriptor,
+  profileId,
+  candidateCommit,
+  expectedTree,
+  baseCommit,
+  toolchain,
+  environment,
+  policySchemaVersion = '1.0.0',
+}) {
+  assertProfileId(profileId);
+  if (policySchemaVersion !== '1.0.0' && policySchemaVersion !== '1.1.0') {
+    throw new VerificationError('SCHEMA_INVALID', 'unsupported task-policy schemaVersion');
+  }
+  validateDescriptor(descriptor);
+  validateStringMap(toolchain, 'toolchain');
+  validateEnvironmentMap(environment, 'environment');
+  const ordered = topologicalTasks(descriptor);
+  resolveCommit(repo, candidateCommit, 'candidate commit');
+  const candidateTree = git(repo, ['show', '-s', '--format=%T', candidateCommit]).trim();
+  assertString(expectedTree, 'expected tree', GIT_OBJECT);
+  if (candidateTree !== expectedTree) {
+    throw new VerificationError(
+      'TREE_MISMATCH',
+      'candidate commit tree does not match expected tree',
+    );
+  }
+  const profile = descriptor.profiles.find((entry) => entry.profileId === profileId);
+  if (profile === undefined) {
+    throw new VerificationError('PROFILE_UNKNOWN', `unknown profile ${profileId}`);
+  }
+  let changes = [];
+  if (profile.mode === 'affected') {
+    if (baseCommit === undefined) {
+      throw new VerificationError(
+        'BASE_REQUIRED',
+        'affected profile requires an exact base commit',
+      );
+    }
+    resolveCommit(repo, baseCommit, 'base commit');
+    const ancestor = spawnSync('git', [
+      '-C',
+      repo,
+      'merge-base',
+      '--is-ancestor',
+      baseCommit,
+      candidateCommit,
+    ]);
+    if (ancestor.status !== 0) {
+      throw new VerificationError(
+        'BASE_NOT_ANCESTOR',
+        'base commit is not an ancestor of candidate',
+      );
+    }
+    changes = changedPaths(repo, baseCommit, candidateCommit).filter(
+      (path) => !isHarnessMutatedPath(path),
+    );
+  }
+  const selected = selectedNodeIds(descriptor, profile, changes);
+  const { entries } = candidateSnapshot(repo, candidateCommit);
+  const { descriptorDigest, requiredNodes } = requiredNodesFor({
+    repo,
+    descriptor,
+    ordered,
+    selected,
+    candidateCommit,
+    entries,
+    toolchain,
+    environment,
+    policySchemaVersion,
+  });
   const taskPolicy = {
     schemaVersion: policySchemaVersion,
     repositoryId: descriptor.repositoryId,
@@ -661,6 +716,565 @@ export function buildExpectedTaskPolicy({
     taskPolicyDigest: sha256Hex(taskPolicy),
     descriptorDigest,
     profileId,
+    candidateTree,
+    changedPaths: changes,
+  };
+}
+
+// ---------------------------------------------------------------------------------------
+// Release-intent reconstruction (ADR-REL-0031).
+//
+// An independent port of the release verification decision and task selection of the
+// DEVAI check runner (packages/cli/src/services/release-profile.ts and the release target
+// of its task planner). A release run selects its nodes by capability from a pinned
+// release intent and a release verification profile and pins the release form of the
+// task policy: schema 1.2.0 with an exact-candidate-tree input projection. The exporter
+// rebuilds that policy from the pins alone and never from the task set a receipt claims.
+// ---------------------------------------------------------------------------------------
+
+const RELEASE_STAGES = ['preflight', 'certify'];
+const RELEASE_INPUT_PROJECTION = Object.freeze({
+  schemaVersion: '1.0.0',
+  source: 'exact-candidate-tree',
+  excludedPrefixes: Object.freeze([...HARNESS_MUTATED_PREFIXES].sort()),
+});
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const KNOWN_RISKS = new Set([
+  'authentication',
+  'authorization',
+  'tenancy',
+  'rls',
+  'cryptography',
+  'secrets',
+  'credentials',
+  'database',
+  'migration',
+  'release-integrity',
+  'evidence',
+  'provenance',
+  'publication',
+  'ledger',
+  'mutation-policy',
+  'test-policy',
+  'test-configuration',
+  'sanitization',
+  'public-api',
+  'export-map',
+  'package-boundary',
+  'lockfile',
+  'toolchain',
+  'cross-package',
+  'large-change',
+  'protected-resource',
+]);
+const UNCONDITIONAL_FLOOR = [
+  'formatting-hygiene',
+  'lint',
+  'type-integrity',
+  'schema-consistency',
+  'secret-scan',
+  'path-portability',
+  'package-integrity',
+  'exact-candidate',
+];
+/** The capabilities a release preflight executes; mirrors release-preflight.ts. */
+const PREFLIGHT_CAPABILITIES = [...UNCONDITIONAL_FLOOR];
+const BROAD_CAPABILITIES = [
+  'unit',
+  'integration',
+  'e2e',
+  'consumer',
+  'api-compatibility',
+  'migration',
+  'rollback',
+  'adopter-materialization',
+  'security',
+  'database',
+  'tenancy',
+  'provenance',
+  'reproducibility',
+];
+const TRANSITION_CAPABILITIES = {
+  patch: ['affected-checks', 'dependent-checks', 'build-integrity'],
+  prerelease: ['affected-checks', 'dependent-checks', 'build-integrity'],
+  minor: ['unit', 'integration', 'e2e', 'consumer', 'api-compatibility', 'adopter-materialization'],
+  major: BROAD_CAPABILITIES,
+  'support-promotion': [...BROAD_CAPABILITIES, 'operational-matrix'],
+};
+const LTS_CAPABILITIES = [...BROAD_CAPABILITIES, 'operational-matrix'];
+// Prerelease ladder of law/policy/release-lifecycle.json (ADR-REL-0028).
+const PRERELEASE_IDENTIFIER = /^(alpha|beta|rc)\.(0|[1-9][0-9]*)$/u;
+const RUNG_ORDER = ['alpha', 'beta', 'rc'];
+const STABLE_FROM = 'rc';
+const RUNG_CAPABILITIES = {
+  alpha: [...UNCONDITIONAL_FLOOR, 'affected-checks', 'dependent-checks'],
+  beta: [...UNCONDITIONAL_FLOOR, 'affected-checks', 'dependent-checks', 'unit', 'integration'],
+  rc: [...UNCONDITIONAL_FLOOR, 'affected-checks', 'dependent-checks', ...BROAD_CAPABILITIES],
+};
+const INTENT_KEYS = [
+  'schemaVersion',
+  'release_unit',
+  'current_version',
+  'target_version',
+  'support',
+  'support_promotion',
+  'change_kind',
+  'channel',
+  'changed_paths',
+  'changed_packages',
+  'risks',
+  'owner_escalations',
+  'candidate',
+  'base',
+];
+const INTENT_REQUIRED = [
+  'schemaVersion',
+  'release_unit',
+  'current_version',
+  'target_version',
+  'support',
+  'changed_paths',
+  'changed_packages',
+  'candidate',
+  'base',
+];
+const RISK_IDENTIFIER = /^[a-z][a-z0-9-]{0,63}$/u;
+
+function parseVersion(value) {
+  const match = SEMVER.exec(value);
+  if (match === null) return undefined;
+  const prerelease = (match[4] ?? '')
+    .split('.')
+    .filter(Boolean)
+    .map((identifier) => (/^\d+$/u.test(identifier) ? Number(identifier) : identifier));
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]), prerelease };
+}
+
+/** `null` for a stable version, `undefined` for a prerelease outside the ladder. */
+function resolveRung(version) {
+  if (version.prerelease.length === 0) return null;
+  const match = PRERELEASE_IDENTIFIER.exec(version.prerelease.join('.'));
+  if (match === null) return undefined;
+  return { rung: match[1], suffix: Number(match[2]) };
+}
+
+function sameCore(left, right) {
+  return left.major === right.major && left.minor === right.minor && left.patch === right.patch;
+}
+
+function ladderPromotionAllowed(current, target) {
+  if (current === null) return target === null;
+  if (target === null) return current.rung === STABLE_FROM;
+  if (current.rung === target.rung) return target.suffix > current.suffix;
+  return RUNG_ORDER.indexOf(target.rung) === RUNG_ORDER.indexOf(current.rung) + 1;
+}
+
+function comparePrerelease(left, right) {
+  if (left.length === 0 && right.length === 0) return 0;
+  if (left.length === 0) return 1;
+  if (right.length === 0) return -1;
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    if (a === b) continue;
+    if (typeof a === 'number' && typeof b === 'string') return -1;
+    if (typeof a === 'string' && typeof b === 'number') return 1;
+    return a < b ? -1 : 1;
+  }
+  return 0;
+}
+
+function compareVersions(left, right) {
+  for (const key of ['major', 'minor', 'patch']) {
+    if (left[key] !== right[key]) return left[key] < right[key] ? -1 : 1;
+  }
+  return comparePrerelease(left.prerelease, right.prerelease);
+}
+
+function classifyTransition(current, target, promotion) {
+  const comparison = compareVersions(current, target);
+  if (comparison === 0) return promotion ? 'support-promotion' : undefined;
+  if (comparison > 0) return undefined;
+  if (current.prerelease.length > 0 || target.prerelease.length > 0) return 'prerelease';
+  if (current.major !== target.major) return 'major';
+  if (current.minor !== target.minor) return 'minor';
+  return 'patch';
+}
+
+function blockedDecision(support, reason) {
+  return {
+    schemaVersion: '1.0.0',
+    verdict: 'block',
+    support,
+    capabilities: [],
+    mutation: 'none',
+    mutationDisposition: { status: 'blocked', reason: 'policy-invalid' },
+    blockingReasons: [reason],
+  };
+}
+
+function addRiskCapabilities(capabilities, risks) {
+  const any = (names) => risks.some((risk) => names.includes(risk));
+  if (risks.length > 0) {
+    capabilities.add('security');
+    capabilities.add('integration');
+  }
+  if (any(['tenancy', 'rls'])) capabilities.add('tenancy');
+  if (any(['database', 'migration'])) capabilities.add('database');
+  if (any(['public-api', 'export-map', 'package-boundary'])) {
+    capabilities.add('api-compatibility');
+    capabilities.add('consumer');
+  }
+  if (any(['release-integrity', 'evidence', 'provenance', 'publication', 'ledger'])) {
+    capabilities.add('provenance');
+    capabilities.add('reproducibility');
+  }
+  if (any(['lockfile', 'toolchain', 'cross-package', 'large-change'])) {
+    capabilities.add('integration');
+    capabilities.add('consumer');
+  }
+}
+
+/** The release verification decision a release run derives from its intent and policy. */
+function releaseDecision(intent, releaseProfile) {
+  const current = parseVersion(intent.current_version);
+  const target = parseVersion(intent.target_version);
+  if (current === undefined || target === undefined) {
+    return blockedDecision(intent.support, 'invalid-semver');
+  }
+  const currentRung = resolveRung(current);
+  const targetRung = resolveRung(target);
+  if (currentRung === undefined || targetRung === undefined) {
+    return blockedDecision(intent.support, 'invalid-semver');
+  }
+  const order = compareVersions(current, target);
+  if (order > 0) return blockedDecision(intent.support, 'downgrade');
+  if (order < 0 && sameCore(current, target) && !ladderPromotionAllowed(currentRung, targetRung)) {
+    return blockedDecision(intent.support, 'downgrade');
+  }
+  const transition = classifyTransition(current, target, intent.support_promotion === true);
+  if (transition === undefined) {
+    return blockedDecision(intent.support, 'same-version-without-support-promotion');
+  }
+  if (transition === 'support-promotion' && intent.support !== 'lts') {
+    return blockedDecision(intent.support, 'support-promotion-requires-lts');
+  }
+  const channel = targetRung === null ? 'stable' : targetRung.rung;
+  if (intent.channel !== undefined && intent.channel !== channel) {
+    return blockedDecision(intent.support, 'channel-mismatch');
+  }
+  const declaredRiskClasses = new Set(Object.keys(releaseProfile.risk_capabilities));
+  const risks = intent.risks ?? [];
+  const unknownRisks = risks.filter(
+    (risk) => !KNOWN_RISKS.has(risk) && !declaredRiskClasses.has(risk),
+  );
+  if (unknownRisks.length > 0) {
+    return blockedDecision(intent.support, `unknown-risk:${unknownRisks.sort().join(',')}`);
+  }
+  const capabilities = new Set([...UNCONDITIONAL_FLOOR, ...TRANSITION_CAPABILITIES[transition]]);
+  const rung = targetRung?.rung ?? (currentRung === null ? undefined : STABLE_FROM);
+  if (rung !== undefined) RUNG_CAPABILITIES[rung].forEach((value) => capabilities.add(value));
+  if (intent.support === 'lts') LTS_CAPABILITIES.forEach((value) => capabilities.add(value));
+  addRiskCapabilities(capabilities, risks);
+  for (const risk of risks) {
+    for (const capability of releaseProfile.risk_capabilities[risk] ?? []) {
+      capabilities.add(capability);
+    }
+  }
+  for (const escalation of intent.owner_escalations ?? []) capabilities.add(escalation);
+  return {
+    schemaVersion: '1.0.0',
+    verdict: 'ready',
+    transition,
+    support: intent.support,
+    capabilities: [...capabilities].sort(),
+    mutation: 'none',
+    mutationDisposition: { status: 'not-required', reason: 'mutation-external-hardening' },
+    blockingReasons: [],
+  };
+}
+
+/** Task roots for the selected capabilities, refusing an unsatisfied capability. */
+function releaseRoots(capabilities, capabilityTasks, knownTasks) {
+  const missing = [];
+  const selected = new Set();
+  for (const capability of capabilities) {
+    const nodes = capabilityTasks[capability] ?? [];
+    if (nodes.length === 0) {
+      missing.push(capability);
+      continue;
+    }
+    for (const nodeId of nodes) {
+      if (!knownTasks.has(nodeId)) {
+        throw new VerificationError(
+          'PROFILE_NODE_UNKNOWN',
+          `release profile capability ${capability} names unknown task ${nodeId}`,
+        );
+      }
+      selected.add(nodeId);
+    }
+  }
+  if (missing.length > 0) {
+    throw new VerificationError(
+      'INTENT_DECISION_BLOCKED',
+      `release decision is not satisfiable: capability-unsatisfied:${missing.sort().join(',')}`,
+    );
+  }
+  return [...selected].sort();
+}
+
+function assertStringArray(value, label, pattern) {
+  assertUniqueStrings(value, label);
+  value.forEach((entry, index) => assertString(entry, `${label}[${index}]`, pattern));
+}
+
+function assertGitIdentity(value, label) {
+  assertExactKeys(value, ['commit', 'tree'], label);
+  assertString(value.commit, `${label}.commit`, GIT_OBJECT);
+  assertString(value.tree, `${label}.tree`, GIT_OBJECT);
+}
+
+/** Structural validation of the fields of release-intent.schema.json the reconstruction reads. */
+export function validateReleaseIntent(intent) {
+  assertObject(intent, 'release intent');
+  for (const key of Object.keys(intent)) {
+    if (!INTENT_KEYS.includes(key)) {
+      throw new VerificationError('SCHEMA_INVALID', `release intent has unknown key ${key}`);
+    }
+  }
+  for (const key of INTENT_REQUIRED) {
+    if (!Object.hasOwn(intent, key)) {
+      throw new VerificationError('SCHEMA_INVALID', `release intent requires ${key}`);
+    }
+  }
+  if (intent.schemaVersion !== '1.0.0') {
+    throw new VerificationError('SCHEMA_INVALID', 'unsupported release-intent schemaVersion');
+  }
+  assertString(intent.release_unit, 'release intent release_unit', /^.{1,200}$/su);
+  assertString(intent.current_version, 'release intent current_version');
+  assertString(intent.target_version, 'release intent target_version');
+  if (!['preview', 'current', 'lts'].includes(intent.support)) {
+    throw new VerificationError('SCHEMA_INVALID', 'release intent support is invalid');
+  }
+  if (intent.support_promotion !== undefined && typeof intent.support_promotion !== 'boolean') {
+    throw new VerificationError('SCHEMA_INVALID', 'release intent support_promotion is invalid');
+  }
+  if (
+    intent.change_kind !== undefined &&
+    !['documentation', 'metadata', 'behavioral'].includes(intent.change_kind)
+  ) {
+    throw new VerificationError('SCHEMA_INVALID', 'release intent change_kind is invalid');
+  }
+  if (intent.channel !== undefined && !['alpha', 'beta', 'rc', 'stable'].includes(intent.channel)) {
+    throw new VerificationError('SCHEMA_INVALID', 'release intent channel is invalid');
+  }
+  assertUniqueStrings(intent.changed_paths, 'release intent changed_paths');
+  intent.changed_paths.forEach((path, index) =>
+    normalizePath(path, `release intent changed_paths[${index}]`),
+  );
+  assertUniqueStrings(intent.changed_packages, 'release intent changed_packages');
+  if (intent.risks !== undefined) {
+    assertStringArray(intent.risks, 'release intent risks', RISK_IDENTIFIER);
+  }
+  if (intent.owner_escalations !== undefined) {
+    assertStringArray(
+      intent.owner_escalations,
+      'release intent owner_escalations',
+      RISK_IDENTIFIER,
+    );
+  }
+  assertGitIdentity(intent.candidate, 'release intent candidate');
+  assertGitIdentity(intent.base, 'release intent base');
+}
+
+/** Structural validation of the release verification profile fields the reconstruction reads. */
+export function validateReleaseProfile(releaseProfile) {
+  assertObject(releaseProfile, 'release verification profile');
+  assertString(
+    releaseProfile.release_unit,
+    'release verification profile release_unit',
+    /^.{1,200}$/su,
+  );
+  assertObject(releaseProfile.capability_tasks, 'release verification profile capability_tasks');
+  for (const [capability, nodes] of Object.entries(releaseProfile.capability_tasks)) {
+    assertStringArray(nodes, `release verification profile capability_tasks.${capability}`);
+  }
+  assertObject(releaseProfile.risk_capabilities, 'release verification profile risk_capabilities');
+  for (const [risk, capabilities] of Object.entries(releaseProfile.risk_capabilities)) {
+    assertStringArray(
+      capabilities,
+      `release verification profile risk_capabilities.${risk}`,
+      RISK_IDENTIFIER,
+    );
+  }
+  if (!Array.isArray(releaseProfile.mutation_roster)) {
+    throw new VerificationError(
+      'SCHEMA_INVALID',
+      'release verification profile mutation_roster must be an array',
+    );
+  }
+}
+
+function sameIdentity(left, right) {
+  return left?.commit === right?.commit && left?.tree === right?.tree;
+}
+
+/**
+ * Reconstructs the release task policy a release-intent run pinned for one stage, from the
+ * pinned intent, release verification profile, descriptor, toolchain, environment, base,
+ * and candidate. Every drift is refused with its own code before any task key is built.
+ */
+export function buildExpectedReleaseTaskPolicy({
+  repo,
+  descriptor,
+  releaseIntent,
+  releaseProfile,
+  stage,
+  candidateCommit,
+  expectedTree,
+  baseCommit,
+  toolchain,
+  environment,
+}) {
+  if (!RELEASE_STAGES.includes(stage)) {
+    throw new VerificationError(
+      'INTENT_STAGE_MISMATCH',
+      `release stage must be preflight or certify, not ${String(stage)}`,
+    );
+  }
+  validateDescriptor(descriptor);
+  validateStringMap(toolchain, 'toolchain');
+  validateEnvironmentMap(environment, 'environment');
+  validateReleaseIntent(releaseIntent);
+  validateReleaseProfile(releaseProfile);
+  if (releaseProfile.release_unit !== releaseIntent.release_unit) {
+    throw new VerificationError(
+      'INTENT_POLICY_STALE',
+      'release verification profile release_unit differs from the intent release_unit',
+    );
+  }
+
+  const candidateMismatch = (message) =>
+    new VerificationError('INTENT_CANDIDATE_MISMATCH', message);
+  if (!sameIdentity(releaseIntent.candidate, { commit: candidateCommit, tree: expectedTree })) {
+    throw candidateMismatch('candidate commit and tree differ from the intent candidate');
+  }
+  let candidateTree;
+  try {
+    resolveCommit(repo, candidateCommit, 'candidate commit');
+    candidateTree = git(repo, ['rev-parse', '--verify', `${candidateCommit}^{tree}`]).trim();
+  } catch (error) {
+    if (!(error instanceof VerificationError)) throw error;
+    throw candidateMismatch(`candidate commit does not resolve: ${error.message}`);
+  }
+  if (candidateTree !== expectedTree) {
+    throw candidateMismatch('candidate commit tree differs from the intent candidate tree');
+  }
+
+  const baseMismatch = (message) => new VerificationError('INTENT_BASE_MISMATCH', message);
+  if (baseCommit !== releaseIntent.base.commit) {
+    throw baseMismatch('base commit differs from the intent base');
+  }
+  let baseTree;
+  try {
+    resolveCommit(repo, baseCommit, 'base commit');
+    baseTree = git(repo, ['rev-parse', '--verify', `${baseCommit}^{tree}`]).trim();
+  } catch (error) {
+    if (!(error instanceof VerificationError)) throw error;
+    throw baseMismatch(`base commit does not resolve: ${error.message}`);
+  }
+  if (baseTree !== releaseIntent.base.tree) {
+    throw baseMismatch('base commit does not resolve to the intent base tree');
+  }
+  const ancestor = spawnSync('git', [
+    '-C',
+    repo,
+    'merge-base',
+    '--is-ancestor',
+    baseCommit,
+    candidateCommit,
+  ]);
+  if (ancestor.status !== 0) {
+    throw baseMismatch('base commit is not an ancestor of the candidate');
+  }
+
+  const decision = releaseDecision(releaseIntent, releaseProfile);
+  if (decision.verdict !== 'ready') {
+    throw new VerificationError(
+      'INTENT_DECISION_BLOCKED',
+      `release decision is ${decision.verdict}: ${decision.blockingReasons.join(',')}`,
+    );
+  }
+
+  const ordered = topologicalTasks(descriptor);
+  const knownTasks = new Set(descriptor.tasks.map((task) => task.nodeId));
+  // Mutation roster selection adds no task node while mutation evidence stays external
+  // hardening (decision.mutation is always none), so the certify roots are the capability
+  // roots alone and no task key carries a release mutation binding.
+  const capabilities =
+    stage === 'preflight'
+      ? decision.capabilities.filter((capability) => PREFLIGHT_CAPABILITIES.includes(capability))
+      : decision.capabilities;
+  const roots = releaseRoots(capabilities, releaseProfile.capability_tasks, knownTasks);
+  const affectedSelection =
+    stage === 'certify' && decision.capabilities.includes('affected-checks');
+  let changes = [];
+  let selectionProfile = { profileId: `release:${stage}`, mode: 'fixed', requiredNodes: roots };
+  if (affectedSelection) {
+    const affected = descriptor.profiles.find((entry) => entry.profileId === 'affected');
+    if (affected?.mode !== 'affected') {
+      throw new VerificationError(
+        'PROFILE_UNKNOWN',
+        'release affected-checks selection requires the descriptor profile affected',
+      );
+    }
+    changes = changedPaths(repo, baseCommit, candidateCommit).filter(
+      (path) => !isHarnessMutatedPath(path),
+    );
+    selectionProfile = {
+      ...selectionProfile,
+      mode: 'affected',
+      eligibleNodes: affected.eligibleNodes,
+    };
+  }
+  const selected = selectedNodeIds(descriptor, selectionProfile, changes);
+  const { entries } = candidateSnapshot(repo, candidateCommit);
+  const { descriptorDigest, requiredNodes, blobDigests } = requiredNodesFor({
+    repo,
+    descriptor,
+    ordered,
+    selected,
+    candidateCommit,
+    entries,
+    toolchain,
+    environment,
+    policySchemaVersion: '1.2.0',
+  });
+  const projection = entries.map((entry) => ({
+    path: entry.path,
+    mode: entry.mode,
+    type: entry.type,
+    contentDigest: blobDigests.get(entry.objectId),
+  }));
+  const taskPolicy = {
+    schemaVersion: '1.2.0',
+    repositoryId: descriptor.repositoryId,
+    requiredNodes,
+    inputProjection: {
+      ...RELEASE_INPUT_PROJECTION,
+      excludedPrefixes: [...RELEASE_INPUT_PROJECTION.excludedPrefixes],
+      digest: sha256Hex(projection),
+    },
+  };
+  return {
+    taskPolicy,
+    taskPolicyDigest: sha256Hex(taskPolicy),
+    descriptorDigest,
+    decision,
+    stage,
     candidateTree,
     changedPaths: changes,
   };

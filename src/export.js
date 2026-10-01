@@ -19,7 +19,12 @@ import {
   canonicalize,
   sha256Hex,
 } from './canonical.js';
-import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
+import {
+  buildExpectedReleaseTaskPolicy,
+  buildExpectedTaskPolicy,
+  readEnvironmentMap,
+  readStringMap,
+} from './policy-builder.js';
 import { mutationContractVersion } from './mutation.js';
 import { MUTATION_V21_SCHEMA } from './mutation-v21.js';
 import { MUTATION_V22_SCHEMA } from './mutation-v22.js';
@@ -32,6 +37,20 @@ import {
 
 const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const SHA256 = /^[0-9a-f]{64}$/u;
+const PREFLIGHT_RECEIPT_KEYS = [
+  'schemaVersion',
+  'repository',
+  'base',
+  'releaseIntentDigest',
+  'releaseProfileDigest',
+  'taskPolicyDigest',
+  'toolchainDigest',
+  'checks',
+  'verdict',
+  'blockingReasons',
+  'createdAt',
+];
 
 function git(repo, args) {
   try {
@@ -186,9 +205,14 @@ function validateSignerId(value) {
     throw new VerificationError('SCHEMA_INVALID', 'signer ID is invalid');
 }
 
+/** Task policies whose required nodes carry output contracts: 1.1.0 and the release form 1.2.0. */
+function carriesOutputContracts(taskPolicy) {
+  return taskPolicy.schemaVersion === '1.1.0' || taskPolicy.schemaVersion === '1.2.0';
+}
+
 function declaredArtifactPaths(taskPolicy) {
   const paths = new Set();
-  if (taskPolicy.schemaVersion !== '1.1.0') return [];
+  if (!carriesOutputContracts(taskPolicy)) return [];
   for (const node of taskPolicy.requiredNodes) {
     for (const path of node.outputContract.paths ?? []) paths.add(path);
   }
@@ -217,6 +241,210 @@ function candidateRepository(repo) {
   }
 }
 
+function isReleasePreflightReceipt(receipt) {
+  return (
+    receipt !== null &&
+    typeof receipt === 'object' &&
+    !Array.isArray(receipt) &&
+    (Object.hasOwn(receipt, 'releaseIntentDigest') || Object.hasOwn(receipt, 'checks'))
+  );
+}
+
+function validatePreflightReceipt(preflight) {
+  const invalid = (detail) =>
+    new VerificationError('SCHEMA_INVALID', `release preflight receipt ${detail}`);
+  if (preflight === null || typeof preflight !== 'object' || Array.isArray(preflight)) {
+    throw invalid('must be an object');
+  }
+  const keys = Object.keys(preflight).sort();
+  const expected = [...PREFLIGHT_RECEIPT_KEYS].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw invalid(`keys must be exactly ${expected.join(', ')}`);
+  }
+  if (preflight.schemaVersion !== '1.0.0') throw invalid('schemaVersion is unsupported');
+  for (const key of [
+    'releaseIntentDigest',
+    'releaseProfileDigest',
+    'taskPolicyDigest',
+    'toolchainDigest',
+  ]) {
+    if (typeof preflight[key] !== 'string' || !SHA256.test(preflight[key])) {
+      throw invalid(`${key} must be a SHA-256 digest`);
+    }
+  }
+  const identity = (value, label, keysExpected) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw invalid(`${label} must be an object`);
+    }
+    const actual = Object.keys(value).sort();
+    if (
+      actual.length !== keysExpected.length ||
+      actual.some((key, index) => key !== keysExpected[index]) ||
+      !GIT_OBJECT.test(value.commit) ||
+      !GIT_OBJECT.test(value.tree)
+    ) {
+      throw invalid(`${label} must be an exact commit and tree`);
+    }
+  };
+  identity(preflight.repository, 'repository', ['commit', 'id', 'tree']);
+  identity(preflight.base, 'base', ['commit', 'tree']);
+  if (typeof preflight.repository.id !== 'string' || preflight.repository.id === '') {
+    throw invalid('repository id must be a nonempty string');
+  }
+}
+
+function sameIdentity(left, right) {
+  return left?.commit === right?.commit && left?.tree === right?.tree;
+}
+
+/**
+ * The release-intent path (ADR-REL-0031): reconstructs the expected release task policy
+ * from the pins the release preflight receipt carries and compares the receipt to it,
+ * never trusting the task set the receipt claims. Every drift is refused with its own code.
+ */
+function reconstructReleaseIntentPolicy({
+  repository,
+  descriptor,
+  receipt,
+  options,
+  toolchainPath,
+  environmentPath,
+}) {
+  if (options.releaseStage !== 'certify') {
+    throw new VerificationError(
+      'INTENT_STAGE_MISMATCH',
+      `release-intent export certifies the certify stage, not ${String(options.releaseStage)}`,
+    );
+  }
+  const intent = readExternalJson(
+    controlledInput(repository, options.releaseIntentPath, 'release intent'),
+    'release intent',
+  );
+  const releaseProfile = readExternalJson(
+    controlledInput(repository, options.releaseProfilePath, 'release verification profile'),
+    'release verification profile',
+  );
+  const preflight = readExternalJson(
+    controlledInput(repository, options.preflightReceiptPath, 'release preflight receipt'),
+    'release preflight receipt',
+  );
+  if (isReleasePreflightReceipt(receipt)) {
+    throw new VerificationError(
+      'INTENT_STAGE_MISMATCH',
+      'the receipt is a release preflight receipt, not a certify candidate receipt',
+    );
+  }
+  if (
+    receipt === null ||
+    typeof receipt !== 'object' ||
+    Array.isArray(receipt) ||
+    !Array.isArray(receipt.tasks)
+  ) {
+    throw new VerificationError('SCHEMA_INVALID', 'candidate receipt tasks must be an array');
+  }
+  validatePreflightReceipt(preflight);
+  if (sha256Hex(intent) !== preflight.releaseIntentDigest) {
+    throw new VerificationError(
+      'INTENT_DIGEST_MISMATCH',
+      'release intent digest differs from the preflight receipt releaseIntentDigest',
+    );
+  }
+  if (sha256Hex(releaseProfile) !== preflight.releaseProfileDigest) {
+    throw new VerificationError(
+      'INTENT_POLICY_STALE',
+      'release verification profile digest differs from the preflight receipt releaseProfileDigest',
+    );
+  }
+  if (releaseProfile?.release_unit !== intent?.release_unit) {
+    throw new VerificationError(
+      'INTENT_POLICY_STALE',
+      'release verification profile release_unit differs from the intent release_unit',
+    );
+  }
+  const toolchain = readStringMap(toolchainPath, 'toolchain');
+  if (sha256Hex(toolchain) !== preflight.toolchainDigest) {
+    throw new VerificationError(
+      'INTENT_DIGEST_MISMATCH',
+      'toolchain digest differs from the preflight receipt toolchainDigest',
+    );
+  }
+  if (
+    options.baseCommit === undefined ||
+    options.baseCommit !== intent?.base?.commit ||
+    !sameIdentity(intent.base, preflight.base)
+  ) {
+    throw new VerificationError(
+      'INTENT_BASE_MISMATCH',
+      '--base, the intent base, and the preflight receipt base are not one commit and tree',
+    );
+  }
+  const candidate = { commit: options.commit, tree: options.tree };
+  if (
+    !sameIdentity(candidate, intent?.candidate) ||
+    !sameIdentity(candidate, preflight.repository) ||
+    preflight.repository.id !== descriptor?.repositoryId
+  ) {
+    throw new VerificationError(
+      'INTENT_CANDIDATE_MISMATCH',
+      '--commit and --tree, the intent candidate, and the preflight receipt repository are not one candidate',
+    );
+  }
+  const pins = {
+    repo: repository,
+    descriptor,
+    releaseIntent: intent,
+    releaseProfile,
+    candidateCommit: options.commit,
+    expectedTree: options.tree,
+    baseCommit: options.baseCommit,
+    toolchain,
+    environment: readEnvironmentMap(environmentPath, 'environment'),
+  };
+  const certify = buildExpectedReleaseTaskPolicy({ ...pins, stage: 'certify' });
+  const preflightStage = buildExpectedReleaseTaskPolicy({ ...pins, stage: 'preflight' });
+  if (
+    receipt.taskPolicyDigest === preflightStage.taskPolicyDigest &&
+    preflightStage.taskPolicyDigest !== certify.taskPolicyDigest
+  ) {
+    throw new VerificationError(
+      'INTENT_STAGE_MISMATCH',
+      'the receipt task policy is the preflight-stage reconstruction, not the certify stage',
+    );
+  }
+  const expectedKeys = new Map(
+    certify.taskPolicy.requiredNodes.map((node) => [node.nodeId, node.taskKey]),
+  );
+  const claimed = new Set();
+  for (const task of receipt.tasks) {
+    const nodeId = task?.nodeId;
+    if (
+      !expectedKeys.has(nodeId) ||
+      claimed.has(nodeId) ||
+      expectedKeys.get(nodeId) !== task.taskKey
+    ) {
+      throw new VerificationError(
+        'INTENT_POPULATION_INCOMPLETE',
+        `receipt task ${String(nodeId)} is not a reconstructed required node with its task key`,
+      );
+    }
+    claimed.add(nodeId);
+  }
+  if (claimed.size !== expectedKeys.size) {
+    const missing = [...expectedKeys.keys()].filter((nodeId) => !claimed.has(nodeId));
+    throw new VerificationError(
+      'INTENT_POPULATION_INCOMPLETE',
+      `receipt omits reconstructed required nodes: ${missing.join(', ')}`,
+    );
+  }
+  if (receipt.taskPolicyDigest !== certify.taskPolicyDigest) {
+    throw new VerificationError(
+      'POLICY_DIGEST_MISMATCH',
+      'receipt task policy digest differs from the certify reconstruction',
+    );
+  }
+  return { ...certify, profileId: receipt.profile };
+}
+
 export function preflightCandidateEvidence(options) {
   const repository = candidateRepository(options.repo);
   exactCandidate(repository, options.commit, options.tree);
@@ -235,17 +463,27 @@ export function preflightCandidateEvidence(options) {
   const output = outputDestination(repository, options.outputDir);
   const descriptor = readCommittedDescriptor(repository, options.commit);
   const receipt = readExternalJson(options.receiptPath, 'candidate receipt');
-  const built = buildExpectedTaskPolicy({
-    repo: repository,
-    descriptor,
-    profileId: options.profile,
-    candidateCommit: options.commit,
-    expectedTree: options.tree,
-    baseCommit: options.baseCommit,
-    toolchain: readStringMap(controlledToolchain, 'toolchain'),
-    environment: readEnvironmentMap(controlledEnvironment, 'environment'),
-    policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
-  });
+  const built =
+    options.releaseIntentPath === undefined
+      ? buildExpectedTaskPolicy({
+          repo: repository,
+          descriptor,
+          profileId: options.profile,
+          candidateCommit: options.commit,
+          expectedTree: options.tree,
+          baseCommit: options.baseCommit,
+          toolchain: readStringMap(controlledToolchain, 'toolchain'),
+          environment: readEnvironmentMap(controlledEnvironment, 'environment'),
+          policySchemaVersion: receipt.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
+        })
+      : reconstructReleaseIntentPolicy({
+          repository,
+          descriptor,
+          receipt,
+          options,
+          toolchainPath: controlledToolchain,
+          environmentPath: controlledEnvironment,
+        });
   for (const node of built.taskPolicy.requiredNodes) {
     const contract = node.outputContract;
     // Legacy v1 and draft v2.0 mutation evidence stays readable for historical
@@ -311,7 +549,9 @@ export function exportCandidateEvidence(options) {
 
   const { repository, output, descriptor, receipt, built, artifactPaths, controlledPublicKey } =
     preflightCandidateEvidence(options);
-  const { resultsDir, signerId, commit, tree, profile } = options;
+  const { resultsDir, signerId, commit, tree } = options;
+  // The intent path names no descriptor profile; its bundle carries the receipt's profile.
+  const profile = options.releaseIntentPath === undefined ? options.profile : receipt.profile;
 
   // Signing starts only once the non-signing preflight above has fully verified this
   // candidate, so the protected key is never applied to evidence that has not already
@@ -375,7 +615,7 @@ export function exportCandidateEvidence(options) {
       expectedPolicyDigest: built.taskPolicyDigest,
     });
     const manifest = {
-      schemaVersion: built.taskPolicy.schemaVersion === '1.1.0' ? '1.1.0' : '1.0.0',
+      schemaVersion: carriesOutputContracts(built.taskPolicy) ? '1.1.0' : '1.0.0',
       repositoryId: descriptor.repositoryId,
       commit,
       tree,
@@ -384,7 +624,7 @@ export function exportCandidateEvidence(options) {
       taskPolicyDigest: built.taskPolicyDigest,
       envelopeDigest: sha256Hex(envelope),
       resultDigests: receipt.tasks.map((task) => task.resultDigest).sort(),
-      ...(built.taskPolicy.schemaVersion === '1.1.0' && {
+      ...(carriesOutputContracts(built.taskPolicy) && {
         artifacts: verified.verifiedArtifacts.map((path) => ({
           path,
           mediaType: artifactMediaType(path),
