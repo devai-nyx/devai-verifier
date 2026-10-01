@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 import { VerificationError, canonicalize, readJson } from './canonical.js';
-import { buildExpectedTaskPolicy, readEnvironmentMap, readStringMap } from './policy-builder.js';
+import {
+  assertProfileId,
+  buildExpectedTaskPolicy,
+  readEnvironmentMap,
+  readStringMap,
+} from './policy-builder.js';
 
 const requiredNames = new Set([
   'repo',
@@ -46,6 +51,8 @@ function emitError(code, message, exitCode) {
 
 try {
   const values = parseArguments(process.argv.slice(2));
+  // A profile id is checked against its grammar before the descriptor is read.
+  assertProfileId(values.profile);
   const built = buildExpectedTaskPolicy({
     repo: values.repo,
     descriptor: readJson(values.descriptor, 'task descriptor'),

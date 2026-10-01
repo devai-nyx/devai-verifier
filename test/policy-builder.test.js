@@ -15,6 +15,9 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { sha256Hex } from '../src/canonical.js';
 import { buildExpectedTaskPolicy, selectorMatches } from '../src/policy-builder.js';
+// Namespace import: an export the source does not yet provide must fail its own cases,
+// never the link of this whole file.
+import * as policyBuilder from '../src/policy-builder.js';
 
 const CLI = resolve(import.meta.dirname, '../src/build-policy-cli.js');
 const TOOLCHAIN = { node: '24.5.0', git: '2.50.1' };
@@ -911,6 +914,324 @@ describe('policy-builder CLI', () => {
     assert.deepEqual(
       policy.requiredNodes.map((node) => node.nodeId),
       ['prepare', 'unit', 'contract'],
+    );
+  });
+});
+
+// ADR-REL-0031: profile-id grammar and the release-intent reconstruction.
+
+describe('profile id grammar (ADR-REL-0031 IA-005)', () => {
+  it('refuses a path where a profile id is expected before consulting the descriptor', () => {
+    const state = repository();
+    const candidate = commit(state.repo, 'candidate');
+    const readableFile = join(state.repo, 'config.json');
+    for (const profileId of [readableFile, 'profiles/rc', 'profiles\\rc', '../rc']) {
+      expectCode('PROFILE_ID_INVALID', () =>
+        build({ repo: state.repo, candidate, base: state.base, profileId }),
+      );
+      // Raised before the descriptor is read: an invalid descriptor cannot mask it.
+      expectCode('PROFILE_ID_INVALID', () =>
+        build({ repo: state.repo, candidate, base: state.base, profileId, policy: {} }),
+      );
+    }
+    expectCode('SCHEMA_INVALID', () =>
+      build({ repo: state.repo, candidate, base: state.base, profileId: 'rc', policy: {} }),
+    );
+    // A well-formed id the descriptor does not declare keeps PROFILE_UNKNOWN.
+    expectCode('PROFILE_UNKNOWN', () =>
+      build({ repo: state.repo, candidate, base: state.base, profileId: 'not-declared' }),
+    );
+    // A declared id still builds through the unchanged profile path.
+    assert.deepEqual(
+      build({ repo: state.repo, candidate, profileId: 'rc' }).taskPolicy.requiredNodes.map(
+        (node) => node.nodeId,
+      ),
+      ['prepare', 'unit', 'contract', 'full'],
+    );
+  });
+
+  it('reports PROFILE_ID_INVALID from the policy CLI for a readable file passed as a profile', () => {
+    const state = repository();
+    const candidate = commit(state.repo, 'CLI candidate');
+    const root = mkdtempSync(join(tmpdir(), 'devai-policy-profile-'));
+    temporaryDirectories.push(root);
+    const inputs = {
+      descriptor: join(root, 'descriptor.json'),
+      toolchain: join(root, 'toolchain.json'),
+      environment: join(root, 'environment.json'),
+    };
+    writeFileSync(inputs.descriptor, JSON.stringify(descriptor()));
+    writeFileSync(inputs.toolchain, JSON.stringify(TOOLCHAIN));
+    writeFileSync(inputs.environment, JSON.stringify(ENVIRONMENT));
+    const run = (profile, output) =>
+      spawnSync(
+        process.execPath,
+        [
+          CLI,
+          '--repo',
+          state.repo,
+          '--descriptor',
+          inputs.descriptor,
+          '--profile',
+          profile,
+          '--commit',
+          candidate.commit,
+          '--tree',
+          candidate.tree,
+          '--toolchain',
+          inputs.toolchain,
+          '--environment',
+          inputs.environment,
+          '--output',
+          output,
+        ],
+        { cwd: root, encoding: 'utf8' },
+      );
+    const asPath = run(inputs.descriptor, join(root, 'path-policy.json'));
+    assert.equal(asPath.status, 2);
+    assert.equal(JSON.parse(asPath.stderr).code, 'PROFILE_ID_INVALID');
+    const bareFile = run('toolchain.json', join(root, 'bare-policy.json'));
+    assert.equal(bareFile.status, 2);
+    assert.equal(JSON.parse(bareFile.stderr).code, 'PROFILE_ID_INVALID');
+    const unknown = run('not-declared', join(root, 'unknown-policy.json'));
+    assert.equal(unknown.status, 2);
+    assert.equal(JSON.parse(unknown.stderr).code, 'PROFILE_UNKNOWN');
+  });
+});
+
+const RELEASE_PREFLIGHT_CAPABILITIES = [
+  'formatting-hygiene',
+  'lint',
+  'type-integrity',
+  'schema-consistency',
+  'secret-scan',
+  'path-portability',
+  'package-integrity',
+  'exact-candidate',
+];
+const RELEASE_CERTIFY_ONLY_CAPABILITIES = ['affected-checks', 'dependent-checks', 'build-integrity'];
+const RELEASE_TOOLCHAIN = { node: '24.5.0' };
+const RELEASE_INPUT_PROJECTION = {
+  schemaVersion: '1.0.0',
+  source: 'exact-candidate-tree',
+  excludedPrefixes: ['.devai/state/', 'record/', 'scratch/'],
+};
+
+function releaseDescriptor() {
+  const releaseTask = (nodeId, dependencies, inputSelectors) =>
+    task({ nodeId, dependencies, inputSelectors, allowlistedEnv: [] });
+  return {
+    schemaVersion: '1.0.0',
+    descriptorVersion: 'release-reference-1',
+    repositoryId: 'fixture-repository',
+    fallbackNodeId: null,
+    dynamicFallbackSelectors: [],
+    tasks: [
+      releaseTask(
+        'prepare',
+        [],
+        [
+          { kind: 'exact', pattern: 'package.json' },
+          { kind: 'exact', pattern: 'test-tasks.json' },
+        ],
+      ),
+      releaseTask('unit', ['prepare'], [{ kind: 'prefix', pattern: 'src/' }]),
+      releaseTask('docs', [], [{ kind: 'prefix', pattern: 'docs/' }]),
+    ],
+    profiles: [
+      {
+        profileId: 'affected',
+        mode: 'affected',
+        requiredNodes: ['prepare'],
+        eligibleNodes: ['prepare', 'unit', 'docs'],
+      },
+      // Oracles only: fixed node sets equal to the selections the intent path must make.
+      { profileId: 'rc', mode: 'fixed', requiredNodes: ['prepare', 'unit'] },
+      { profileId: 'with-docs', mode: 'fixed', requiredNodes: ['prepare', 'unit', 'docs'] },
+      { profileId: 'preflight-floor', mode: 'fixed', requiredNodes: ['prepare'] },
+    ],
+  };
+}
+
+function releaseVerificationProfile() {
+  return {
+    schemaVersion: '1.0.0',
+    policy_id: 'fixture.release',
+    policy_version: '1.0.0',
+    release_unit: 'fixture-repository',
+    version_source: 'package.json',
+    default_support: 'current',
+    capability_tasks: {
+      ...Object.fromEntries(RELEASE_PREFLIGHT_CAPABILITIES.map((name) => [name, ['prepare']])),
+      ...Object.fromEntries(RELEASE_CERTIFY_ONLY_CAPABILITIES.map((name) => [name, ['unit']])),
+    },
+    risk_capabilities: {},
+    mutation_roster: [],
+  };
+}
+
+function releaseRepository({ touchDocs = false } = {}) {
+  const repo = mkdtempSync(join(tmpdir(), 'devai-policy-release-'));
+  temporaryDirectories.push(repo);
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.name', 'Verifier Test']);
+  git(repo, ['config', 'user.email', 'verifier@example.invalid']);
+  put(repo, 'docs/notes.md', '# Notes\n');
+  put(repo, 'package.json', '{"name":"fixture","version":"1.0.0"}\n');
+  put(repo, 'src/a.js', 'export const value = 1;\n');
+  put(repo, 'test-tasks.json', `${JSON.stringify(releaseDescriptor(), null, 2)}\n`);
+  const base = commit(repo, 'base');
+  put(repo, 'package.json', '{"name":"fixture","version":"1.0.1"}\n');
+  put(repo, 'src/a.js', 'export const value = 2;\n');
+  if (touchDocs) put(repo, 'docs/notes.md', '# Notes, revised\n');
+  const candidate = commit(repo, 'candidate');
+  const intent = {
+    schemaVersion: '1.0.0',
+    release_unit: 'fixture-repository',
+    current_version: '1.0.0',
+    target_version: '1.0.1',
+    support: 'current',
+    changed_paths: touchDocs
+      ? ['docs/notes.md', 'package.json', 'src/a.js']
+      : ['package.json', 'src/a.js'],
+    changed_packages: [],
+    candidate: { ...candidate },
+    base: { ...base },
+  };
+  return { repo, base, candidate, intent };
+}
+
+function releaseInputProjectionDigest(repo, revision) {
+  const output = execFileSync('git', ['-C', repo, 'ls-tree', '-r', '-z', '--full-tree', revision]);
+  const entries = [];
+  for (const record of output.toString('utf8').split('\0')) {
+    if (record === '') continue;
+    const [, mode, type, objectId, path] = /^(\d+) ([a-z]+) ([0-9a-f]+)\t(.+)$/u.exec(record);
+    if (RELEASE_INPUT_PROJECTION.excludedPrefixes.some((prefix) => path.startsWith(prefix))) {
+      continue;
+    }
+    const content = execFileSync('git', ['-C', repo, 'cat-file', 'blob', objectId]);
+    entries.push({ path, mode, type, contentDigest: sha256Hex(content) });
+  }
+  entries.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return sha256Hex(entries);
+}
+
+/**
+ * Independent oracle: without mutation bindings, protected executable identities, or
+ * preflight probe nodes, a release task key equals the fixed-profile task key, so the
+ * release policy is the schema 1.1 policy of the same node set re-versioned to 1.2.0
+ * with the exact-candidate-tree input projection.
+ */
+function releaseOracle(state, profileId) {
+  const built = buildExpectedTaskPolicy({
+    repo: state.repo,
+    descriptor: releaseDescriptor(),
+    profileId,
+    candidateCommit: state.candidate.commit,
+    expectedTree: state.candidate.tree,
+    toolchain: RELEASE_TOOLCHAIN,
+    environment: {},
+    policySchemaVersion: '1.1.0',
+  });
+  const taskPolicy = {
+    ...built.taskPolicy,
+    schemaVersion: '1.2.0',
+    inputProjection: {
+      ...RELEASE_INPUT_PROJECTION,
+      digest: releaseInputProjectionDigest(state.repo, state.candidate.commit),
+    },
+  };
+  return { taskPolicy, taskPolicyDigest: sha256Hex(taskPolicy) };
+}
+
+function buildRelease(state, overrides = {}) {
+  assert.equal(
+    typeof policyBuilder.buildExpectedReleaseTaskPolicy,
+    'function',
+    'policy-builder.js must export buildExpectedReleaseTaskPolicy (ADR-REL-0031)',
+  );
+  return policyBuilder.buildExpectedReleaseTaskPolicy({
+    repo: state.repo,
+    descriptor: releaseDescriptor(),
+    releaseIntent: state.intent,
+    releaseProfile: releaseVerificationProfile(),
+    stage: 'certify',
+    candidateCommit: state.candidate.commit,
+    expectedTree: state.candidate.tree,
+    baseCommit: state.base.commit,
+    toolchain: RELEASE_TOOLCHAIN,
+    environment: {},
+    ...overrides,
+  });
+}
+
+describe('release-intent task policy reconstruction (ADR-REL-0031)', () => {
+  it('reconstructs the certify and preflight release policies from the pinned intent', () => {
+    const state = releaseRepository();
+    const certify = buildRelease(state);
+    const oracle = releaseOracle(state, 'rc');
+    assert.deepEqual(certify.taskPolicy, oracle.taskPolicy);
+    assert.equal(certify.taskPolicyDigest, oracle.taskPolicyDigest);
+    assert.equal(certify.taskPolicyDigest, sha256Hex(certify.taskPolicy));
+    assert.equal(certify.descriptorDigest, sha256Hex(releaseDescriptor()));
+    assert.equal(certify.decision.verdict, 'ready');
+    assert.equal(certify.decision.transition, 'patch');
+    assert.ok(certify.decision.capabilities.includes('affected-checks'));
+
+    const preflight = buildRelease(state, { stage: 'preflight' });
+    assert.deepEqual(preflight.taskPolicy, releaseOracle(state, 'preflight-floor').taskPolicy);
+    assert.notEqual(preflight.taskPolicyDigest, certify.taskPolicyDigest);
+  });
+
+  it('closes the certify selection over the affected base-to-candidate change set', () => {
+    const state = releaseRepository({ touchDocs: true });
+    assert.deepEqual(buildRelease(state).taskPolicy, releaseOracle(state, 'with-docs').taskPolicy);
+    // The preflight stage selects by capability only, never by affected change.
+    assert.deepEqual(
+      buildRelease(state, { stage: 'preflight' }).taskPolicy,
+      releaseOracle(state, 'preflight-floor').taskPolicy,
+    );
+  });
+
+  it('is deterministic and independent of the key order of its pinned inputs', () => {
+    const state = releaseRepository();
+    const reordered = Object.fromEntries(Object.entries(state.intent).reverse());
+    const profile = Object.fromEntries(Object.entries(releaseVerificationProfile()).reverse());
+    assert.equal(
+      buildRelease(state, { releaseIntent: reordered, releaseProfile: profile }).taskPolicyDigest,
+      buildRelease(state).taskPolicyDigest,
+    );
+  });
+
+  it('refuses a blocked decision, a foreign release unit, and an unknown stage', () => {
+    const state = releaseRepository();
+    assert.throws(
+      () => buildRelease(state, { releaseIntent: { ...state.intent, channel: 'beta' } }),
+      (error) => error?.code === 'INTENT_DECISION_BLOCKED' && /channel-mismatch/u.test(error.message),
+    );
+    expectCode('INTENT_POLICY_STALE', () =>
+      buildRelease(state, {
+        releaseProfile: { ...releaseVerificationProfile(), release_unit: 'other-unit' },
+      }),
+    );
+    expectCode('INTENT_STAGE_MISMATCH', () => buildRelease(state, { stage: 'release' }));
+  });
+
+  it('refuses a base or candidate that is not the intent base or candidate', () => {
+    const state = releaseRepository();
+    expectCode('INTENT_BASE_MISMATCH', () =>
+      buildRelease(state, { baseCommit: state.candidate.commit }),
+    );
+    expectCode('INTENT_BASE_MISMATCH', () =>
+      buildRelease(state, {
+        releaseIntent: { ...state.intent, base: { ...state.base, tree: state.candidate.tree } },
+      }),
+    );
+    expectCode('INTENT_CANDIDATE_MISMATCH', () =>
+      buildRelease(state, {
+        releaseIntent: { ...state.intent, candidate: { ...state.base } },
+      }),
     );
   });
 });

@@ -260,6 +260,25 @@ supplies the protected resolver; callers must not work around that refusal by
 relabeling reused evidence as fresh.
 
 Affected-mode export additionally requires `--base <exact-ancestor-commit>`.
+
+A `--profile` value is a descriptor profile id, never a path: a value containing
+`/`, `\`, or `.` is refused with `PROFILE_ID_INVALID` before the descriptor is read, and
+`PROFILE_UNKNOWN` is reserved for a well-formed id the descriptor does not declare.
+
+The certify receipt of a release-intent run exports through the release-intent
+path instead of `--profile`: supply `--release-intent`, `--release-profile`,
+`--release-stage certify`, `--preflight-receipt`, and `--base` together. The
+exporter reconstructs the release task policy (schema 1.2.0 with an
+exact-candidate-tree input projection) from the intent, the release verification
+profile, the committed descriptor, the toolchain, the environment, the base, and
+the candidate pinned by the release preflight receipt, and compares the receipt to
+that reconstruction rather than trusting the tasks it claims. Combining
+`--profile` with any intent argument, or omitting one of them, is `USAGE`. Drift is
+refused with `INTENT_DIGEST_MISMATCH`, `INTENT_STAGE_MISMATCH`,
+`INTENT_POLICY_STALE`, `INTENT_BASE_MISMATCH`, `INTENT_CANDIDATE_MISMATCH`,
+`INTENT_POPULATION_INCOMPLETE`, `INTENT_DECISION_BLOCKED`, or
+`POLICY_DIGEST_MISMATCH` (ADR-REL-0031), and no output is created on refusal.
+
 The output directory is created atomically. Legacy schema 1.0 bundles contain
 `envelope.json`, `task-policy.json`, `trust-store.json`, `manifest.json`, and the
 exact digest-named results. Schema 1.1 bundles contain no trust store: remote
