@@ -39,6 +39,22 @@
           "outputContract"
         ],
         "properties": {
+          "sensorKinds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "type_check",
+                "unit_test",
+                "integration_test",
+                "e2e_test",
+                "perf_test",
+                "build",
+                "migration_check"
+              ]
+            }
+          },
           "nodeId": { "type": "string", "minLength": 1 },
           "dependencies": {
             "type": "array",
@@ -69,7 +85,26 @@
             "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
           },
           "outputContract": { "type": "object" }
-        }
+        },
+        "allOf": [
+          {
+            "if": { "required": ["sensorKinds"] },
+            "then": {
+              "properties": {
+                "runner": { "not": { "const": "preflight-v1" } },
+                "outputContract": {
+                  "type": "object",
+                  "required": ["population"],
+                  "not": { "required": ["generated_namespaces"] },
+                  "properties": {
+                    "kind": { "enum": ["command-result", "vitest", "workspace-build"] },
+                    "population": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "profiles": {
