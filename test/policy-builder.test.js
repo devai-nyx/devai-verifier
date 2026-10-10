@@ -228,6 +228,183 @@ describe('task-policy schema compatibility', () => {
   });
 });
 
+describe('reviewed sensor task annotations', () => {
+  function annotated() {
+    const policy = descriptor();
+    policy.tasks[1].sensorKinds = ['type_check'];
+    policy.tasks[1].outputContract = { kind: 'command-result', population: 'workspace' };
+    return policy;
+  }
+
+  for (const kind of [
+    'type_check',
+    'unit_test',
+    'integration_test',
+    'e2e_test',
+    'perf_test',
+    'build',
+    'migration_check',
+  ]) {
+    it(`accepts the optional exact ${kind} annotation without stripping policy identity`, () => {
+      const state = repository();
+      const policy = annotated();
+      policy.tasks[1].sensorKinds = [kind];
+      const built = build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policy,
+        policySchemaVersion: '1.1.0',
+      });
+      assert.equal(built.descriptorDigest, sha256Hex(policy));
+      assert.deepEqual(
+        built.taskPolicy.requiredNodes.find((node) => node.nodeId === 'unit').outputContract,
+        policy.tasks[1].outputContract,
+      );
+      const changed = structuredClone(policy);
+      changed.tasks[1].sensorKinds = kind === 'build' ? ['type_check'] : ['build'];
+      const other = build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policy: changed,
+        policySchemaVersion: '1.1.0',
+      });
+      assert.notEqual(other.descriptorDigest, built.descriptorDigest);
+      assert.notEqual(keyMap(other).get('unit'), keyMap(built).get('unit'));
+      assert.notEqual(other.taskPolicyDigest, built.taskPolicyDigest);
+    });
+  }
+
+  it('retains the full ordered annotation list and population in descriptor and task-key identity', () => {
+    const state = repository();
+    const policy = annotated();
+    policy.tasks[1].sensorKinds = ['type_check', 'build'];
+    const original = build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy });
+    for (const change of [
+      (node) => {
+        node.sensorKinds.reverse();
+      },
+      (node) => {
+        node.outputContract.population = 'changed-population';
+      },
+      (node) => {
+        delete node.sensorKinds;
+      },
+    ]) {
+      const changed = structuredClone(policy);
+      change(changed.tasks[1]);
+      const other = build({
+        repo: state.repo,
+        candidate: state.base,
+        profileId: 'rc',
+        policy: changed,
+      });
+      assert.notEqual(other.descriptorDigest, original.descriptorDigest);
+      assert.notEqual(keyMap(other).get('unit'), keyMap(original).get('unit'));
+    }
+  });
+
+  for (const [label, change] of [
+    [
+      'empty list',
+      (node) => {
+        node.sensorKinds = [];
+      },
+    ],
+    [
+      'duplicate kind',
+      (node) => {
+        node.sensorKinds = ['type_check', 'type_check'];
+      },
+    ],
+    [
+      'unknown kind',
+      (node) => {
+        node.sensorKinds = ['inventory_api'];
+      },
+    ],
+    [
+      'non-array annotation',
+      (node) => {
+        node.sensorKinds = 'type_check';
+      },
+    ],
+    [
+      'missing population',
+      (node) => {
+        delete node.outputContract.population;
+      },
+    ],
+    [
+      'empty population',
+      (node) => {
+        node.outputContract.population = '';
+      },
+    ],
+    [
+      'non-string population',
+      (node) => {
+        node.outputContract.population = 1;
+      },
+    ],
+    [
+      'unsupported result kind',
+      (node) => {
+        node.outputContract.kind = 'mutation-report-set-v2';
+      },
+    ],
+    [
+      'protected namespace census',
+      (node) => {
+        node.outputContract.generated_namespaces = [];
+      },
+    ],
+    [
+      'preflight runner',
+      (node) => {
+        node.runner = 'preflight-v1';
+        delete node.argv;
+        node.probes = [];
+      },
+    ],
+    [
+      'unknown sibling key',
+      (node) => {
+        node.sensorKind = 'type_check';
+      },
+    ],
+  ]) {
+    it(`refuses ${label} on an annotated task`, () => {
+      const state = repository();
+      const policy = annotated();
+      change(policy.tasks[1]);
+      expectCode('SCHEMA_INVALID', () =>
+        build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy }),
+      );
+    });
+  }
+
+  it('preserves ordinary unannotated output contracts and still refuses unrelated task keys', () => {
+    const state = repository();
+    const policy = descriptor();
+    const baseline = build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy });
+    assert.equal(baseline.descriptorDigest, sha256Hex(policy));
+    policy.tasks[1].unknownSensorAuthority = true;
+    expectCode('SCHEMA_INVALID', () =>
+      build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy }),
+    );
+  });
+  it('reports SCHEMA_INVALID for a null task before reading optional annotation keys', () => {
+    const state = repository();
+    const policy = descriptor();
+    policy.tasks[1] = null;
+    expectCode('SCHEMA_INVALID', () =>
+      build({ repo: state.repo, candidate: state.base, profileId: 'rc', policy }),
+    );
+  });
+});
+
 describe('candidate snapshot and affected derivation', () => {
   it('reconstructs deterministically when selected blobs exceed one batch buffer', () => {
     const state = repository();
@@ -1009,7 +1186,11 @@ const RELEASE_PREFLIGHT_CAPABILITIES = [
   'package-integrity',
   'exact-candidate',
 ];
-const RELEASE_CERTIFY_ONLY_CAPABILITIES = ['affected-checks', 'dependent-checks', 'build-integrity'];
+const RELEASE_CERTIFY_ONLY_CAPABILITIES = [
+  'affected-checks',
+  'dependent-checks',
+  'build-integrity',
+];
 const RELEASE_TOOLCHAIN = { node: '24.5.0' };
 const RELEASE_INPUT_PROJECTION = {
   schemaVersion: '1.0.0',
@@ -1208,7 +1389,8 @@ describe('release-intent task policy reconstruction (ADR-REL-0031)', () => {
     const state = releaseRepository();
     assert.throws(
       () => buildRelease(state, { releaseIntent: { ...state.intent, channel: 'beta' } }),
-      (error) => error?.code === 'INTENT_DECISION_BLOCKED' && /channel-mismatch/u.test(error.message),
+      (error) =>
+        error?.code === 'INTENT_DECISION_BLOCKED' && /channel-mismatch/u.test(error.message),
     );
     expectCode('INTENT_POLICY_STALE', () =>
       buildRelease(state, {
