@@ -61,10 +61,11 @@ function objectContentDigests(repo, objectIds) {
     sizes.set(expectedObjectId, size);
     sizeOffset = newline + 1;
   }
-  if (sizeOffset !== sizeOutput.length) throw new VerificationError('GIT_ERROR', 'extra cat-file output');
+  if (sizeOffset !== sizeOutput.length)
+    throw new VerificationError('GIT_ERROR', 'extra cat-file output');
 
   const maxBatchBytes = 32 * 1024 * 1024;
-  for (let start = 0; start < unique.length; ) {
+  for (let start = 0; start < unique.length;) {
     const batch = [];
     let estimatedBytes = 0;
     while (start + batch.length < unique.length) {
@@ -242,6 +243,7 @@ function validateDescriptor(descriptor) {
   const taskIds = [];
   for (const [index, task] of descriptor.tasks.entries()) {
     const label = `tasks[${index}]`;
+    assertObject(task, label);
     assertExactKeys(
       task,
       [
@@ -253,6 +255,7 @@ function validateDescriptor(descriptor) {
         'nodeId',
         'outputContract',
         'runner',
+        ...(Object.hasOwn(task, 'sensorKinds') ? ['sensorKinds'] : []),
         'toolchainKeys',
       ],
       label,
@@ -290,6 +293,37 @@ function validateDescriptor(descriptor) {
     );
     assertObject(task.outputContract, `${label}.outputContract`);
     canonicalBytes(task.outputContract);
+    if (Object.hasOwn(task, 'sensorKinds')) {
+      const allowedKinds = [
+        'type_check',
+        'unit_test',
+        'integration_test',
+        'e2e_test',
+        'perf_test',
+        'build',
+        'migration_check',
+      ];
+      assertUniqueStrings(task.sensorKinds, `${label}.sensorKinds`);
+      if (
+        task.sensorKinds.length === 0 ||
+        task.sensorKinds.some((kind) => !allowedKinds.includes(kind))
+      ) {
+        throw new VerificationError('SCHEMA_INVALID', `${label}.sensorKinds is unsupported`);
+      }
+      assertString(task.outputContract.population, `${label}.outputContract.population`);
+      if (
+        task.outputContract.population.length === 0 ||
+        task.runner === 'preflight-v1' ||
+        Object.hasOwn(task.outputContract, 'generated_namespaces') ||
+        (task.outputContract.kind !== undefined &&
+          !['command-result', 'vitest', 'workspace-build'].includes(task.outputContract.kind))
+      ) {
+        throw new VerificationError(
+          'SCHEMA_INVALID',
+          `${label} sensor output contract is unsupported`,
+        );
+      }
+    }
     taskIds.push(task.nodeId);
   }
   assertUniqueStrings(taskIds, 'task node IDs');
